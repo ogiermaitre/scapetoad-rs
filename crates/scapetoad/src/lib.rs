@@ -32,6 +32,7 @@ pub mod io;
 pub mod layer;
 mod raster;
 pub mod stats;
+pub mod topology;
 
 pub use cartogram::{
     AttributeKind, Cartogram, CartogramBuilder, CartogramOptions, GridResolution, Progress, Report,

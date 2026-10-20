@@ -21,6 +21,10 @@ use scapetoad::{
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    /// TopoJSON outputs: round positions to an N×N grid over the extent and delta-encode
+    /// them (1000000 ≈ 0.35 m over Switzerland). Smaller files, but no longer exact.
+    #[arg(long, global = true, value_name = "N", value_parser = clap::value_parser!(u32).range(2..))]
+    quantize: Option<u32>,
 }
 
 #[derive(Subcommand)]
@@ -137,10 +141,14 @@ struct ApplyArgs {
 }
 
 fn main() -> Result<()> {
-    match Cli::parse().command {
-        Command::Info { source } => info(&source),
-        Command::Compute(args) => compute(*args),
-        Command::Apply(args) => apply(args),
+    let cli = Cli::parse();
+    let mut outputs = Outputs::new(io::WriteOptions {
+        topojson_quantization: cli.quantize,
+    });
+    match cli.command {
+        Command::Info { source } => return info(&source),
+        Command::Compute(args) => compute(*args, &mut outputs)?,
+        Command::Apply(args) => apply(args, &mut outputs)?,
         Command::Grid {
             field,
             output,
@@ -148,10 +156,11 @@ fn main() -> Result<()> {
         } => {
             let field = DeformationField::load(&field)
                 .with_context(|| format!("reading {}", field.display()))?;
-            write(&field.grid_layer(lines), &output)
+            outputs.write(field.grid_layer(lines), &output)?;
         }
-        Command::Convert { source, output } => write(&read(&source)?, &output),
+        Command::Convert { source, output } => outputs.write(read(&source)?, &output)?,
     }
+    outputs.finish()
 }
 
 fn read(source: &Path) -> Result<Layer> {
@@ -165,13 +174,73 @@ fn read(source: &Path) -> Result<Layer> {
     Ok(layer)
 }
 
-fn write(layer: &Layer, target: &Path) -> Result<()> {
-    if let Some(dir) = target.parent().filter(|d| !d.as_os_str().is_empty()) {
+fn create_parent(path: &Path) -> Result<()> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }
-    io::write_layer(layer, target).with_context(|| format!("writing {}", target.display()))?;
-    eprintln!("wrote {}", target.display());
     Ok(())
+}
+
+/// Writes output layers. Most formats are written at once; layers aimed at the same
+/// TopoJSON file wait for [`Outputs::finish`], because the file is written whole so that
+/// its layers share their borders.
+struct Outputs {
+    options: io::WriteOptions,
+    topojson: Vec<(PathBuf, Vec<Layer>)>,
+}
+
+impl Outputs {
+    fn new(options: io::WriteOptions) -> Self {
+        Self {
+            options,
+            topojson: Vec::new(),
+        }
+    }
+
+    /// Writes `layer` to `target`, or keeps it for its TopoJSON file. The layer is named
+    /// after `#name` in the target, or keeps its own name (made unique within the file).
+    fn write(&mut self, mut layer: Layer, target: &Path) -> Result<()> {
+        let (path, name) = match target.to_string_lossy().rsplit_once('#') {
+            Some((p, n)) if !n.is_empty() => (PathBuf::from(p), Some(n.to_string())),
+            _ => (target.to_path_buf(), None),
+        };
+        if io::Format::from_path(&path) != io::Format::TopoJson {
+            create_parent(target)?;
+            io::write_layer(&layer, target)
+                .with_context(|| format!("writing {}", target.display()))?;
+            eprintln!("wrote {}", target.display());
+            return Ok(());
+        }
+        let layers = match self.topojson.iter_mut().find(|(p, _)| *p == path) {
+            Some((_, layers)) => layers,
+            None => {
+                self.topojson.push((path, Vec::new()));
+                &mut self.topojson.last_mut().expect("just pushed").1
+            }
+        };
+        let base = name.unwrap_or_else(|| layer.name.clone());
+        layer.name = base.clone();
+        let mut n = 2;
+        while layers.iter().any(|l| l.name == layer.name) {
+            layer.name = format!("{base}_{n}");
+            n += 1;
+        }
+        layers.push(layer);
+        Ok(())
+    }
+
+    /// Writes the TopoJSON files collected so far.
+    fn finish(self) -> Result<()> {
+        for (path, layers) in &self.topojson {
+            create_parent(path)?;
+            let refs: Vec<&Layer> = layers.iter().collect();
+            io::write_layers(&refs, path, &self.options)
+                .with_context(|| format!("writing {}", path.display()))?;
+            let names: Vec<&str> = layers.iter().map(|l| l.name.as_str()).collect();
+            eprintln!("wrote {} ({})", path.display(), names.join(", "));
+        }
+        Ok(())
+    }
 }
 
 /// `<out_dir>/<stem>_cartogram.<ext>`, the extension defaulting to the input's.
@@ -280,7 +349,7 @@ fn geometry_name(g: &scapetoad::geo_types::Geometry<f64>) -> &'static str {
     }
 }
 
-fn compute(args: ComputeArgs) -> Result<()> {
+fn compute(args: ComputeArgs, outputs: &mut Outputs) -> Result<()> {
     let master = read(&args.master)?;
     let constrained: Vec<Layer> = args
         .constrained
@@ -351,10 +420,12 @@ fn compute(args: ComputeArgs) -> Result<()> {
         .output
         .clone()
         .unwrap_or_else(|| default_output(&args.master, &args.out_dir, args.format.as_deref()));
-    write(&carto.master, &master_out)?;
+    outputs.write(carto.master.clone(), &master_out)?;
     for (input, output, layer) in &extra {
         let out = carto.field.transform_layer(layer);
-        write(&out, output).with_context(|| format!("transforming {}", input.display()))?;
+        outputs
+            .write(out, output)
+            .with_context(|| format!("transforming {}", input.display()))?;
     }
     if let Some(path) = &args.field {
         carto
@@ -364,10 +435,10 @@ fn compute(args: ComputeArgs) -> Result<()> {
         eprintln!("wrote {}", path.display());
     }
     if let Some(path) = &args.grid {
-        write(&carto.field.grid_layer(args.grid_lines), path)?;
+        outputs.write(carto.field.grid_layer(args.grid_lines), path)?;
     }
     if let Some(path) = &args.legend {
-        write(&carto.legend_layer(args.legend_values.as_deref()), path)?;
+        outputs.write(carto.legend_layer(args.legend_values.as_deref()), path)?;
     }
     match &args.report {
         Some(path) => {
@@ -386,7 +457,7 @@ fn contains(outer: &Rect<f64>, inner: &Rect<f64>) -> bool {
         && inner.max().y <= outer.max().y
 }
 
-fn apply(args: ApplyArgs) -> Result<()> {
+fn apply(args: ApplyArgs, outputs: &mut Outputs) -> Result<()> {
     if args.output.is_some() && args.sources.len() > 1 {
         bail!("--output takes a single input; use --out-dir for several");
     }
@@ -407,7 +478,7 @@ fn apply(args: ApplyArgs) -> Result<()> {
             .output
             .clone()
             .unwrap_or_else(|| default_output(source, &args.out_dir, args.format.as_deref()));
-        write(&field.transform_layer(&layer), &out)?;
+        outputs.write(field.transform_layer(&layer), &out)?;
     }
     Ok(())
 }

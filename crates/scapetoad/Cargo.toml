@@ -7,9 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["shp", "geojson", "fgb"]
+default = ["shp", "geojson", "fgb", "topojson"]
 shp = ["dep:shapefile"]
 geojson = ["dep:geojson", "dep:serde_json"]
+topojson = ["dep:serde_json"]
 fgb = ["dep:flatgeobuf", "dep:geozero"]
 # gdal-sys only ships bindings up to GDAL 3.9; bindgen generates them for the installed
 # version (needs libclang).

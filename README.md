@@ -78,10 +78,28 @@ Geometries are [`geo-types`](https://docs.rs/geo-types) (re-exported as
 | Shapefile | `.shp` | `shp` (default) |
 | GeoJSON | `.geojson`, `.json` | `geojson` (default) |
 | FlatGeobuf | `.fgb` | `fgb` (default) |
+| TopoJSON | `.topojson` | `topojson` (default) |
 | GeoPackage, GeoParquet, GML, KML, CSV, FileGDB… | `.gpkg`, `.parquet`, … | `gdal` (needs libgdal) |
 
 Multi-layer sources take a layer name after `#`: `data.gpkg#roads`. Writing to an existing
 GeoPackage adds or replaces that layer.
+
+A TopoJSON file stores each border once, even when it is shared by two features or by two
+layers (a commune and its canton), so all its layers are written together. The command
+collects every output aimed at the same `.topojson` file and writes it at the end:
+
+```sh
+T=out/ch.topojson
+scapetoad compute communes.fgb --attr POP -o "$T#communes" \
+    --layer "cantons.fgb=$T#cantons" --layer "lakes.fgb=$T#lakes" \
+    --grid "$T#grid" --legend "$T#legend" --quantize 1000000
+```
+
+Coordinates are exact by default. `--quantize N` rounds them to an N×N grid over the extent
+and delta-encodes them; on the Swiss communes example, 10⁶ (about 0.3 m) gives 3.3 MB
+instead of 12.4 MB. In the library, `io::write_layers` writes several layers at once and
+`topology::Topology` builds the topology itself; it depends only on `geo-types`. QGIS reads
+TopoJSON (through GDAL) but cannot write it.
 
 The `gdal` feature needs GDAL and libclang at build time (`brew install gdal`; libclang
 comes with the Xcode command-line tools). Bindings are generated for the installed GDAL

@@ -150,3 +150,58 @@ fn geopackage_holds_several_layers() {
     // Without a layer name, a multi-layer file is ambiguous.
     assert!(io::read_layer(&path).is_err());
 }
+
+/// Normalises what a topology may change on top of [`single`]: rings start at a junction
+/// rather than at their original first vertex, and repeated vertices are dropped.
+fn rings_from_min(g: Geometry<f64>) -> Geometry<f64> {
+    use scapetoad::geo_types::{Coord, LineString, MultiPolygon, Polygon};
+    let ring = |ls: &LineString<f64>| {
+        let mut pts: Vec<Coord<f64>> = ls.0[..ls.0.len() - 1].to_vec();
+        pts.dedup();
+        let start = (0..pts.len())
+            .min_by(|&a, &b| {
+                (pts[a].x, pts[a].y)
+                    .partial_cmp(&(pts[b].x, pts[b].y))
+                    .unwrap()
+            })
+            .unwrap();
+        pts.rotate_left(start);
+        pts.push(pts[0]);
+        LineString(pts)
+    };
+    let polygon = |p: &Polygon<f64>| {
+        Polygon::new(ring(p.exterior()), p.interiors().iter().map(ring).collect())
+    };
+    match single(g) {
+        Geometry::Polygon(p) => Geometry::Polygon(polygon(&p)),
+        Geometry::MultiPolygon(mp) => {
+            Geometry::MultiPolygon(MultiPolygon(mp.iter().map(polygon).collect()))
+        }
+        g => g,
+    }
+}
+
+#[cfg(feature = "topojson")]
+#[test]
+fn topojson_holds_several_layers() {
+    let cantons = io::read_layer(data("Cantons.shp")).unwrap();
+    let lakes = io::read_layer(data("Lakes.shp")).unwrap();
+    let path = tmp("swiss.topojson");
+    io::write_layers(&[&cantons, &lakes], &path, &io::WriteOptions::default()).unwrap();
+
+    for layer in [&cantons, &lakes] {
+        let back = io::read_layer(format!("{}#{}", path.display(), layer.name)).unwrap();
+        assert_eq!(back.name, layer.name);
+        assert_eq!(back.fields.len(), layer.fields.len());
+        assert_eq!(back.features.len(), layer.features.len());
+        for (a, b) in layer.features.iter().zip(&back.features) {
+            assert_eq!(a.values, b.values);
+            assert_eq!(
+                a.geometry.clone().map(rings_from_min),
+                b.geometry.clone().map(rings_from_min)
+            );
+        }
+    }
+    // Without a layer name, a multi-layer file is ambiguous.
+    assert!(io::read_layer(&path).is_err());
+}
