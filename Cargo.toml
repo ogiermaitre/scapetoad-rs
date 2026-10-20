@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/scapetoad", "crates/scapetoad-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/christiankaiser/ScapeToad"
+
+[workspace.dependencies]
+scapetoad = { path = "crates/scapetoad" }
+geo = "0.33"
+geo-types = "0.7"
+rustdct = "0.7"
+rayon = "1.12"
+thiserror = "2"
+shapefile = "0.9"
+geojson = "1"
+flatgeobuf = "6"
+geozero = "0.15"
+gdal = "0.19"
+# preserve_order keeps attribute column order; float_roundtrip reads coordinates back exactly.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+clap = { version = "4.6", features = ["derive"] }
+anyhow = "1"
+
+[profile.release]
+debug = 1

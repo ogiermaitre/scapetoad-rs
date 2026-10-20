@@ -1,0 +1,20 @@
+[package]
+name = "scapetoad-cli"
+description = "Command-line interface for the scapetoad cartogram library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "scapetoad"
+path = "src/main.rs"
+
+[features]
+default = []
+gdal = ["scapetoad/gdal"]
+
+[dependencies]
+scapetoad.workspace = true
+clap.workspace = true
+anyhow.workspace = true

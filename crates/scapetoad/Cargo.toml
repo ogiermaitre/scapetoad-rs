@@ -1,0 +1,27 @@
+[package]
+name = "scapetoad"
+description = "Diffusion-based cartograms (Gastner–Newman), a Rust port of ScapeToad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["shp", "geojson", "fgb"]
+shp = ["dep:shapefile"]
+geojson = ["dep:geojson", "dep:serde_json"]
+fgb = ["dep:flatgeobuf", "dep:geozero"]
+gdal = ["dep:gdal"]
+
+[dependencies]
+geo.workspace = true
+geo-types.workspace = true
+rustdct.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+shapefile = { workspace = true, optional = true, features = ["geo-types", "encoding_rs"] }
+geojson = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+flatgeobuf = { workspace = true, optional = true }
+geozero = { workspace = true, optional = true, features = ["with-geo"] }
+gdal = { workspace = true, optional = true }
