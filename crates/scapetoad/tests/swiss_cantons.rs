@@ -58,6 +58,7 @@ fn population_cartogram_is_accurate_and_valid() {
     );
     assert!(r.errors.std_dev < 8.0, "std dev {}", r.errors.std_dev);
     assert_eq!(r.invalid_output, r.invalid_input);
+    assert!(r.invalid_output.is_empty());
 
     // The lakes must stay inside the field and keep all their features.
     let moved = carto.field.transform_layer(&lakes);

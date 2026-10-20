@@ -4,9 +4,8 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use geo::{Area, Validation};
+use geo::Area;
 use geo_types::{Coord, Geometry, LineString, Polygon, Rect};
-use rayon::prelude::*;
 
 use crate::diffusion::{diffuse, DiffusionOptions, DiffusionStep, StopReason};
 use crate::error::{Error, Result};
@@ -237,10 +236,11 @@ pub struct Report {
     pub iterations: usize,
     pub stop: StopReason,
     pub errors: ErrorSummary,
-    /// Master features with an invalid geometry (OGC rules) before the transformation…
-    pub invalid_input: usize,
-    /// …and after. More invalid outputs than inputs means a grid too coarse for the data.
-    pub invalid_output: usize,
+    /// Indices of the master features with an invalid geometry (OGC rules) before the
+    /// transformation…
+    pub invalid_input: Vec<usize>,
+    /// …and after. A feature valid in input becomes invalid only where the grid folded.
+    pub invalid_output: Vec<usize>,
     pub duration: Duration,
 }
 
@@ -309,15 +309,44 @@ impl fmt::Display for Report {
         writeln!(f, "GEOMETRY VALIDITY")?;
         writeln!(
             f,
-            "Invalid geometries: {} in input, {} in output\n",
-            self.invalid_input, self.invalid_output
+            "Invalid geometries: {} in input, {} in output",
+            self.invalid_input.len(),
+            self.invalid_output.len()
         )?;
+        for (when, list) in [
+            ("input", &self.invalid_input),
+            ("output", &self.invalid_output),
+        ] {
+            if !list.is_empty() {
+                writeln!(
+                    f,
+                    "Invalid in {when} (feature index from 0): {}",
+                    index_list(list)
+                )?;
+            }
+        }
+        writeln!(f)?;
         writeln!(
             f,
             "Computation time: {:.1} seconds",
             self.duration.as_secs_f64()
         )
     }
+}
+
+/// Comma-separated indices, cut after the first fifty so a broken run stays readable.
+pub fn index_list(indices: &[usize]) -> String {
+    const SHOWN: usize = 50;
+    let mut s = indices
+        .iter()
+        .take(SHOWN)
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if indices.len() > SHOWN {
+        s.push_str(&format!(" and {} more", indices.len() - SHOWN));
+    }
+    s
 }
 
 /// Attribute values after cleaning: nulls/NaN become 0 (as in ScapeToad) and the missing
@@ -347,14 +376,6 @@ fn clean_values(layer: &Layer, options: &CartogramOptions) -> Result<Vec<f64>> {
             _ => 0.0,
         })
         .collect())
-}
-
-fn count_invalid(layer: &Layer) -> usize {
-    layer
-        .features
-        .par_iter()
-        .filter(|f| f.geometry.as_ref().is_some_and(|g| !g.is_valid()))
-        .count()
 }
 
 fn expand(env: Rect<f64>, margin: f64) -> Rect<f64> {
@@ -542,8 +563,8 @@ fn compute(builder: CartogramBuilder<'_>, progress: &mut dyn FnMut(Progress)) ->
         iterations: result.iterations,
         stop: result.stop,
         errors,
-        invalid_input: count_invalid(master),
-        invalid_output: count_invalid(&projected),
+        invalid_input: master.invalid_features(),
+        invalid_output: projected.invalid_features(),
         duration: start.elapsed(),
     };
 

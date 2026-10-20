@@ -187,6 +187,50 @@ impl Diffusion {
         self.dct.inverse(out, &mut self.tmp);
     }
 
+    /// Upper bound, in grid cells, on how far any point can still move after time `t`.
+    ///
+    /// The density is `Σ A_k cos(k·r) e^{-|k|²t}`, so `|∇ρ| ≤ Σ |A_k| |k| e^{-|k|²t}` and
+    /// `ρ ≥ A_0 - Σ |A_k| e^{-|k|²t}`. Integrating `|∇ρ| / ρ` from `t` to infinity gives
+    /// `Σ |A_k| e^{-|k|²t} / |k|` over that lower bound on `ρ`.
+    ///
+    /// Without this test, the run cannot stop once the density is flat: the transform's
+    /// rounding noise leaves a velocity of about 1e-14, the step keeps growing fourfold, and
+    /// the points end up drifting by a cell per step.
+    fn remaining_motion(&self, t: f64) -> f64 {
+        let (lx, ly) = (self.lx, self.ly);
+        let c00 = self.spectrum[0];
+        if c00 <= 0.0 {
+            return f64::INFINITY;
+        }
+        let kx = |ix: usize| std::f64::consts::PI * ix as f64 / lx as f64;
+        let ky = |iy: usize| std::f64::consts::PI * iy as f64 / ly as f64;
+        let (motion, amplitude) = self
+            .spectrum
+            .par_chunks(lx)
+            .enumerate()
+            .map(|(iy, row)| {
+                let mut acc = (0.0, 0.0);
+                for (ix, &c) in row.iter().enumerate() {
+                    if ix == 0 && iy == 0 {
+                        continue;
+                    }
+                    let k2 = kx(ix).powi(2) + ky(iy).powi(2);
+                    // The inverse transform weighs non-zero frequencies twice per axis.
+                    let weight = if ix > 0 { 2.0 } else { 1.0 } * if iy > 0 { 2.0 } else { 1.0 };
+                    let a = weight * c.abs() / c00 * (-k2 * t).exp();
+                    acc.0 += a / k2.sqrt();
+                    acc.1 += a;
+                }
+                acc
+            })
+            .reduce(|| (0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
+        if amplitude >= 1.0 {
+            f64::INFINITY
+        } else {
+            motion / (1.0 - amplitude)
+        }
+    }
+
     /// Integrates `2h` ahead from time `t` with one big RK4 step and two small ones, moves the
     /// points using the small steps plus local extrapolation, and returns the maximum error
     /// and displacement (both in grid cells) and the snapshot index for time `t + 2h`.
@@ -369,6 +413,7 @@ pub(crate) fn diffuse(
         iteration += 1;
         // The target for a double step is twice the single-step target.
         let desired = (2.0 * TARGET_ERROR / error).powf(0.2);
+        let remaining = diffusion.remaining_motion(t);
         h *= desired.min(MAX_RATIO);
 
         let fraction = ((t / INIT_H).ln() / (EXPECTED_TIME / INIT_H).ln()).clamp(0.0, 1.0);
@@ -379,7 +424,7 @@ pub(crate) fn diffuse(
             fraction,
         });
 
-        if max_displacement <= options.tolerance {
+        if max_displacement <= options.tolerance || remaining <= options.tolerance {
             break StopReason::Converged;
         }
         if iteration >= options.max_iterations {
@@ -432,6 +477,44 @@ mod tests {
             assert!((x - (k % (lx + 1)) as f64).abs() < 1e-9);
             assert!((y - (k / (lx + 1)) as f64).abs() < 1e-9);
         }
+    }
+
+    /// Density 1 with a block of 50 in the lower left quarter.
+    fn block_density(lx: usize, ly: usize) -> Vec<f64> {
+        let mut rho = vec![1.0; lx * ly];
+        for iy in ly / 3..ly / 2 {
+            for ix in lx / 3..lx / 2 {
+                rho[iy * lx + ix] = 50.0;
+            }
+        }
+        rho
+    }
+
+    #[test]
+    fn remaining_motion_vanishes_as_the_density_flattens() {
+        let (lx, ly) = (40, 30);
+        let d = Diffusion::new(&block_density(lx, ly), lx, ly);
+        let bounds: Vec<f64> = [1.0, 1e2, 1e4, 1e6].map(|t| d.remaining_motion(t)).to_vec();
+        assert!(bounds.windows(2).all(|w| w[1] < w[0]), "{bounds:?}");
+        assert!(bounds[3] < 1e-100);
+        let flat = Diffusion::new(&vec![2.0; lx * ly], lx, ly);
+        assert!(flat.remaining_motion(0.0) < 1e-12);
+    }
+
+    #[test]
+    fn stops_before_rounding_noise_moves_the_points() {
+        // Once the density is flat, the transform's rounding noise is the only velocity left,
+        // and the growing time step scales it up: a displacement test alone never ends. The
+        // noise shows with lengths the DCT cannot factor (499 is prime), and a tolerance
+        // below it makes the failure certain instead of depending on the data.
+        let (lx, ly) = (499, 20);
+        let options = DiffusionOptions {
+            tolerance: 1e-10,
+            max_iterations: 100,
+            ..DiffusionOptions::default()
+        };
+        let res = diffuse(&block_density(lx, ly), lx, ly, &options, &mut |_| {});
+        assert_eq!(res.stop, StopReason::Converged);
     }
 
     #[test]
