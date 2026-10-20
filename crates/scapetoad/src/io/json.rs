@@ -1,8 +1,36 @@
 //! Helpers shared by the JSON formats (GeoJSON, TopoJSON).
 
+use std::fs::File;
+use std::io::BufReader;
+use std::path::Path;
+
 use serde_json::Value as JsonValue;
 
-use crate::layer::{Crs, Value};
+use crate::error::{Error, Result};
+use crate::layer::{Crs, Layer, Value};
+
+/// Reads a GeoJSON or TopoJSON file, whatever its extension says: TopoJSON is often
+/// published as `.json`, so the document's `"type"` decides. `object` picks a TopoJSON object.
+pub(super) fn read(path: &Path, object: Option<&str>) -> Result<Layer> {
+    let root: JsonValue = serde_json::from_reader(BufReader::new(File::open(path)?))
+        .map_err(|e| Error::format("json", e))?;
+    let topology = root.get("type").and_then(JsonValue::as_str) == Some("Topology");
+    if topology {
+        #[cfg(feature = "topojson")]
+        return super::topojson::from_json(root, path, object);
+        #[cfg(not(feature = "topojson"))]
+        return Err(Error::UnsupportedFormat(
+            "TopoJSON (build with the `topojson` feature)".into(),
+        ));
+    }
+    let _ = object;
+    #[cfg(feature = "geojson")]
+    return super::geojson::from_json(root, path);
+    #[cfg(not(feature = "geojson"))]
+    Err(Error::UnsupportedFormat(
+        "GeoJSON (build with the `geojson` feature)".into(),
+    ))
+}
 
 /// Reads the pre-RFC 7946 `"crs": {"type": "name", "properties": {"name": "EPSG:xxxx"}}` member.
 pub(super) fn legacy_crs(json: &JsonValue) -> Option<Crs> {

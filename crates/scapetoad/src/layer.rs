@@ -148,6 +148,15 @@ impl Layer {
             .collect())
     }
 
+    /// Whether every coordinate lies within longitude/latitude bounds (±180, ±90). For a
+    /// layer without a CRS this is a hint, not proof: a small projected layer near the
+    /// origin passes too, so use it to warn rather than to assume a CRS.
+    pub fn looks_geographic(&self) -> bool {
+        self.envelope().is_some_and(|e| {
+            e.min().x >= -180.0 && e.max().x <= 180.0 && e.min().y >= -90.0 && e.max().y <= 90.0
+        })
+    }
+
     /// Bounding box of all geometries, `None` for an empty layer.
     pub fn envelope(&self) -> Option<Rect<f64>> {
         self.features

@@ -165,9 +165,17 @@ fn main() -> Result<()> {
 
 fn read(source: &Path) -> Result<Layer> {
     let layer = io::read_layer(source).with_context(|| format!("reading {}", source.display()))?;
-    if layer.crs.as_ref().is_some_and(|c| c.is_geographic()) {
+    let why = match &layer.crs {
+        Some(crs) if crs.is_geographic() => Some("is in geographic coordinates (lat/lon)"),
+        // TopoJSON, and shapefiles without .prj, often carry no CRS at all.
+        None if layer.looks_geographic() => {
+            Some("has no CRS, and its coordinates look like longitude/latitude")
+        }
+        _ => None,
+    };
+    if let Some(why) = why {
         eprintln!(
-            "warning: {} is in geographic coordinates (lat/lon); cartogram areas are only meaningful in a projected, ideally equal-area, CRS",
+            "warning: {} {why}; cartogram areas are only meaningful in a projected, ideally equal-area, CRS",
             source.display()
         );
     }

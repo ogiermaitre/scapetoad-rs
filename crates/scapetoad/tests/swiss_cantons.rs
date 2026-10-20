@@ -151,6 +151,47 @@ fn geopackage_holds_several_layers() {
     assert!(io::read_layer(&path).is_err());
 }
 
+#[cfg(feature = "topojson")]
+#[test]
+fn topojson_is_recognised_in_json_files() {
+    let cantons = io::read_layer(data("Cantons.shp")).unwrap();
+    let lakes = io::read_layer(data("Lakes.shp")).unwrap();
+    // Published TopoJSON is often named .json, the extension we read as GeoJSON.
+    let path = tmp("swiss_topo.json");
+    let topo = tmp("swiss_topo.topojson");
+    io::write_layers(&[&cantons, &lakes], &topo, &io::WriteOptions::default()).unwrap();
+    std::fs::copy(&topo, &path).unwrap();
+
+    let back = io::read_layer(format!("{}#Lakes", path.display())).unwrap();
+    assert_eq!(back.name, "Lakes");
+    assert_eq!(back.features.len(), lakes.features.len());
+    // GeoJSON in a .json file still reads as GeoJSON.
+    let geojson = tmp("cantons.json");
+    io::write_layer(&cantons, &geojson).unwrap();
+    assert_eq!(
+        io::read_layer(&geojson).unwrap().features.len(),
+        cantons.features.len()
+    );
+}
+
+#[test]
+fn geographic_coordinates_are_recognised() {
+    use scapetoad::geo_types::{polygon, Geometry};
+    use scapetoad::{Feature, Layer};
+    // The sample is in Swiss LV03 metres, far outside longitude/latitude bounds.
+    assert!(!io::read_layer(data("Cantons.shp"))
+        .unwrap()
+        .looks_geographic());
+    let mut lonlat = Layer::new("lonlat", Vec::new());
+    lonlat.features.push(Feature {
+        geometry: Some(Geometry::Polygon(polygon![
+            (x: 5.9, y: 45.8), (x: 10.5, y: 45.8), (x: 10.5, y: 47.8), (x: 5.9, y: 47.8)
+        ])),
+        values: Vec::new(),
+    });
+    assert!(lonlat.looks_geographic());
+}
+
 /// Normalises what a topology may change on top of [`single`]: rings start at a junction
 /// rather than at their original first vertex, and repeated vertices are dropped.
 fn rings_from_min(g: Geometry<f64>) -> Geometry<f64> {

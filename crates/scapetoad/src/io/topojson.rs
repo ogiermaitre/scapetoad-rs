@@ -6,7 +6,7 @@
 //! whole, since arcs are shared across all its objects.
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use serde_json::{Map, Value as JsonValue};
@@ -168,11 +168,9 @@ fn geometry_json(g: &TopoGeometry, quantized: bool) -> Map<String, JsonValue> {
     obj
 }
 
-/// Reads one object of a topology as a layer. Without a name, the file must hold a single
-/// object.
-pub(super) fn read(path: &Path, object: Option<&str>) -> Result<Layer> {
-    let root: JsonValue =
-        serde_json::from_reader(BufReader::new(File::open(path)?)).map_err(error)?;
+/// Reads one object of a parsed topology (see `json::read`) as a layer. Without a name, the
+/// topology must hold a single object.
+pub(super) fn from_json(root: JsonValue, path: &Path, object: Option<&str>) -> Result<Layer> {
     if root.get("type").and_then(JsonValue::as_str) != Some("Topology") {
         return Err(error("not a TopoJSON Topology"));
     }

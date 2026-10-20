@@ -78,7 +78,7 @@ Geometries are [`geo-types`](https://docs.rs/geo-types) (re-exported as
 | Shapefile | `.shp` | `shp` (default) |
 | GeoJSON | `.geojson`, `.json` | `geojson` (default) |
 | FlatGeobuf | `.fgb` | `fgb` (default) |
-| TopoJSON | `.topojson` | `topojson` (default) |
+| TopoJSON | `.topojson`; `.json` when reading | `topojson` (default) |
 | GeoPackage, GeoParquet, GML, KML, CSV, FileGDB… | `.gpkg`, `.parquet`, … | `gdal` (needs libgdal) |
 
 Multi-layer sources take a layer name after `#`: `data.gpkg#roads`. Writing to an existing
@@ -101,6 +101,11 @@ instead of 12.4 MB. In the library, `io::write_layers` writes several layers at 
 `topology::Topology` builds the topology itself; it depends only on `geo-types`. QGIS reads
 TopoJSON (through GDAL) but cannot write it.
 
+TopoJSON is often published as `.json`: a `.json` file is read as TopoJSON or GeoJSON
+according to its content (written `.json` files are GeoJSON). TopoJSON has no standard way to
+state its coordinate system, so a file from elsewhere usually has none; published ones are
+mostly longitude/latitude, which the tool then warns about (see below).
+
 The `gdal` feature needs GDAL and libclang at build time (`brew install gdal`; libclang
 comes with the Xcode command-line tools). Bindings are generated for the installed GDAL
 version. Tested with GDAL 3.13. GDAL 3.13 support in the `gdal` crate is not released
@@ -110,7 +115,8 @@ GeoParquet output stores exterior rings counter-clockwise, as its specification 
 so the vertex order differs from a shapefile's; the shapes are identical.
 
 Cartograms need planar coordinates, ideally an equal-area projection. The tool warns on
-lat/lon input but does not reproject.
+lat/lon input, and on input without a CRS whose coordinates all fall within ±180/±90, but
+does not reproject.
 
 ## Differences from ScapeToad
 

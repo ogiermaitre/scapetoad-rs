@@ -5,7 +5,7 @@
 //! legacy `crs` member when the layer has an EPSG code so tools like QGIS place it correctly.
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use geojson::{FeatureCollection, GeoJson, GeometryValue, JsonObject, JsonValue};
@@ -17,9 +17,8 @@ use crate::layer::{Crs, Feature, Layer};
 
 const FORMAT: &str = "geojson";
 
-pub(super) fn read(path: &Path) -> Result<Layer> {
-    let json: JsonValue = serde_json::from_reader(BufReader::new(File::open(path)?))
-        .map_err(|e| Error::format(FORMAT, e))?;
+/// Reads a parsed GeoJSON document (see `json::read`) as a layer named after the file.
+pub(super) fn from_json(json: JsonValue, path: &Path) -> Result<Layer> {
     let crs = legacy_crs(&json);
     let gj: GeoJson = serde_json::from_value(json).map_err(|e| Error::format(FORMAT, e))?;
     let features = match gj {

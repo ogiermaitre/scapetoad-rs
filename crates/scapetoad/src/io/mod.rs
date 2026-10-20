@@ -1,8 +1,9 @@
-//! Reading and writing layers. The format is chosen from the file extension.
+//! Reading and writing layers. The format is chosen from the file extension, except that a
+//! JSON file is read as TopoJSON or GeoJSON according to its content.
 //!
 //! Built in (pure Rust, default features): Shapefile (`.shp`), GeoJSON (`.geojson`, `.json`),
-//! FlatGeobuf (`.fgb`), TopoJSON (`.topojson`). With the `gdal` feature, every other
-//! extension goes through GDAL (GeoPackage, GeoParquet, …). Multi-layer sources take a
+//! FlatGeobuf (`.fgb`), TopoJSON (`.topojson`, or `.json`). With the `gdal` feature, every
+//! other extension goes through GDAL (GeoPackage, GeoParquet, …). Multi-layer sources take a
 //! layer name after `#`: `data.gpkg#roads`, `map.topojson#communes`.
 
 use std::path::{Path, PathBuf};
@@ -80,12 +81,10 @@ pub fn read_layer(source: impl AsRef<Path>) -> Result<Layer> {
     let mut layer = match Format::from_path(&path) {
         #[cfg(feature = "shp")]
         Format::Shapefile => shp::read(&path)?,
-        #[cfg(feature = "geojson")]
-        Format::GeoJson => geojson::read(&path)?,
+        #[cfg(any(feature = "geojson", feature = "topojson"))]
+        Format::GeoJson | Format::TopoJson => json::read(&path, layer_name.as_deref())?,
         #[cfg(feature = "fgb")]
         Format::FlatGeobuf => fgb::read(&path)?,
-        #[cfg(feature = "topojson")]
-        Format::TopoJson => topojson::read(&path, layer_name.as_deref())?,
         #[cfg(feature = "gdal")]
         _ => return gdal::read(&path, layer_name.as_deref()),
         #[allow(unreachable_patterns)]
