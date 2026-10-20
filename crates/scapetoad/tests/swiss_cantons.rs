@@ -92,11 +92,17 @@ fn same_content(a: &Layer, b: &Layer) {
     }
 }
 
-/// Mixed Polygon/MultiPolygon layers are promoted to multi by FlatGeobuf; compare them as
-/// single parts.
+/// Normalises what formats may legitimately change: FlatGeobuf promotes mixed
+/// Polygon/MultiPolygon layers to multi, and GeoParquet stores exterior rings
+/// counter-clockwise where shapefiles store them clockwise.
 fn single(g: Geometry<f64>) -> Geometry<f64> {
+    use geo::orient::{Direction, Orient};
     match g {
-        Geometry::MultiPolygon(mut mp) if mp.0.len() == 1 => Geometry::Polygon(mp.0.remove(0)),
+        Geometry::MultiPolygon(mut mp) if mp.0.len() == 1 => {
+            Geometry::Polygon(mp.0.remove(0).orient(Direction::Default))
+        }
+        Geometry::MultiPolygon(mp) => Geometry::MultiPolygon(mp.orient(Direction::Default)),
+        Geometry::Polygon(p) => Geometry::Polygon(p.orient(Direction::Default)),
         g => g,
     }
 }
@@ -110,4 +116,37 @@ fn formats_round_trip() {
         let back = io::read_layer(&path).unwrap();
         same_content(&cantons, &back);
     }
+}
+
+#[cfg(feature = "gdal")]
+#[test]
+fn gdal_formats_round_trip() {
+    let cantons = io::read_layer(data("Cantons.shp")).unwrap();
+    for ext in ["gpkg", "parquet"] {
+        let path = tmp(&format!("roundtrip.{ext}"));
+        let _ = std::fs::remove_file(&path);
+        io::write_layer(&cantons, &path).unwrap();
+        let back = io::read_layer(&path).unwrap();
+        same_content(&cantons, &back);
+    }
+}
+
+#[cfg(feature = "gdal")]
+#[test]
+fn geopackage_holds_several_layers() {
+    let cantons = io::read_layer(data("Cantons.shp")).unwrap();
+    let lakes = io::read_layer(data("Lakes.shp")).unwrap();
+    let path = tmp("swiss.gpkg");
+    let _ = std::fs::remove_file(&path);
+    let target = |layer: &str| PathBuf::from(format!("{}#{layer}", path.display()));
+
+    io::write_layer(&cantons, target("cantons")).unwrap();
+    io::write_layer(&lakes, target("lakes")).unwrap();
+    // Writing a layer again replaces it instead of appending or failing.
+    io::write_layer(&lakes, target("lakes")).unwrap();
+
+    same_content(&cantons, &io::read_layer(target("cantons")).unwrap());
+    same_content(&lakes, &io::read_layer(target("lakes")).unwrap());
+    // Without a layer name, a multi-layer file is ambiguous.
+    assert!(io::read_layer(&path).is_err());
 }

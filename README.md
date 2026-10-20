@@ -83,6 +83,14 @@ Geometries are [`geo-types`](https://docs.rs/geo-types) (re-exported as
 Multi-layer sources take a layer name after `#`: `data.gpkg#roads`. Writing to an existing
 GeoPackage adds or replaces that layer.
 
+The `gdal` feature needs GDAL and libclang at build time (`brew install gdal`; libclang
+comes with the Xcode command-line tools). Bindings are generated for the installed GDAL
+version. Tested with GDAL 3.13. GDAL 3.13 support in the `gdal` crate is not released
+yet, so the workspace pins it to a git revision (see `Cargo.toml`).
+
+GeoParquet output stores exterior rings counter-clockwise, as its specification requires,
+so the vertex order differs from a shapefile's; the shapes are identical.
+
 Cartograms need planar coordinates, ideally an equal-area projection. The tool warns on
 lat/lon input but does not reproject.
 

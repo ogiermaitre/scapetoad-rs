@@ -11,7 +11,9 @@ default = ["shp", "geojson", "fgb"]
 shp = ["dep:shapefile"]
 geojson = ["dep:geojson", "dep:serde_json"]
 fgb = ["dep:flatgeobuf", "dep:geozero"]
-gdal = ["dep:gdal"]
+# gdal-sys only ships bindings up to GDAL 3.9; bindgen generates them for the installed
+# version (needs libclang).
+gdal = ["dep:gdal", "gdal/bindgen"]
 
 [dependencies]
 geo.workspace = true

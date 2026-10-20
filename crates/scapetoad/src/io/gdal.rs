@@ -114,7 +114,8 @@ pub(super) fn read(path: &Path, layer_name: Option<&str>) -> Result<Layer> {
                     Some(FieldValue::RealValue(x)) => Value::Float(x),
                     Some(FieldValue::StringValue(s)) => Value::Text(s),
                     Some(FieldValue::DateValue(d)) => Value::Text(d.to_string()),
-                    Some(FieldValue::DateTimeValue(d)) => Value::Text(d.to_rfc3339()),
+                    // chrono's Debug is ISO 8601 and, unlike to_rfc3339, needs no chrono feature.
+                    Some(FieldValue::DateTimeValue(d)) => Value::Text(format!("{d:?}")),
                     Some(other) => Value::Text(format!("{other:?}")),
                 })
             })

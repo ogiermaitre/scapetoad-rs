@@ -19,7 +19,9 @@ shapefile = "0.9"
 geojson = "1"
 flatgeobuf = "6"
 geozero = "0.15"
-gdal = "0.19"
+# GDAL 3.13 support (georust/gdal#714) is merged but not released yet (0.19.0 is the
+# latest on crates.io). Go back to a crates.io version once 0.20 is out.
+gdal = { git = "https://github.com/georust/gdal", rev = "c0a6266b987a2c2d44aea9956c2cae1ed71445cf" }
 # preserve_order keeps attribute column order; float_roundtrip reads coordinates back exactly.
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 clap = { version = "4.6", features = ["derive"] }
