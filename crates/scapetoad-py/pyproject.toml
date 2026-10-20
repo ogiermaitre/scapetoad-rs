@@ -1,0 +1,28 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "scapetoad"
+description = "Diffusion-based cartograms (Gastner–Newman), a Rust port of ScapeToad"
+license = "GPL-2.0-or-later"
+requires-python = ">=3.10"
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+
+[project.optional-dependencies]
+geopandas = ["geopandas>=1.0", "shapely>=2.0"]
+
+[dependency-groups]
+dev = ["pytest>=8", "geopandas>=1.0", "shapely>=2.0"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "scapetoad._scapetoad"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

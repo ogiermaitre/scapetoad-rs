@@ -1,0 +1,5 @@
+/.venv
+# Native module copied here by `maturin develop`
+/python/scapetoad/*.so
+/python/scapetoad/*.pyd
+__pycache__/

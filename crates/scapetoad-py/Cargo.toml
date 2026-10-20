@@ -1,0 +1,23 @@
+[package]
+name = "scapetoad-py"
+description = "Python bindings for the scapetoad cartogram library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "_scapetoad"
+crate-type = ["cdylib"]
+
+[features]
+default = []
+gdal = ["scapetoad/gdal"]
+
+[dependencies]
+scapetoad.workspace = true
+# abi3: one wheel for every CPython from 3.10 on.
+pyo3 = { version = "0.29.3", features = ["abi3-py310"] }
+# Geometries cross the boundary as WKB, which shapely and geopandas read and write in bulk.
+geozero = { workspace = true, features = ["with-geo", "with-wkb"] }
