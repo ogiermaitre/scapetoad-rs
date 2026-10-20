@@ -17,11 +17,11 @@ labels) are transformed this way, with the same deformation as the cartogram.
 cargo install --path crates/scapetoad-cli     # add --features gdal for GeoPackage, GeoParquet…
 
 # Look at a layer: attributes, extent, CRS
-scapetoad info testdata/Cantons.shp
+scapetoad info testdata/scapetoad-sample/Cantons.shp
 
 # Compute the cartogram, transform the lakes with it, save the field for later
-scapetoad compute testdata/Cantons.shp --attr Pop2006 \
-    --layer testdata/Lakes.shp \
+scapetoad compute testdata/scapetoad-sample/Cantons.shp --attr Pop2006 \
+    --layer testdata/scapetoad-sample/Lakes.shp \
     --field cantons.stdf --grid grid.geojson --legend legend.geojson \
     --out-dir out --format fgb
 
@@ -30,7 +30,7 @@ scapetoad apply --field cantons.stdf rivers.fgb roads.fgb --out-dir out
 
 # Deformation grid at another density; format conversion
 scapetoad grid --field cantons.stdf -o grid50.geojson --lines 50
-scapetoad convert testdata/Cantons.shp cantons.geojson
+scapetoad convert testdata/scapetoad-sample/Cantons.shp cantons.geojson
 ```
 
 `compute` prints ScapeToad's computation report (size error statistics, plus a count of
@@ -53,8 +53,8 @@ lie inside the envelope; points outside are only extrapolated, and `apply` warns
 ```rust
 use scapetoad::{io, Cartogram, CartogramOptions, GridResolution};
 
-let cantons = io::read_layer("testdata/Cantons.shp")?;
-let lakes = io::read_layer("testdata/Lakes.shp")?;
+let cantons = io::read_layer("testdata/scapetoad-sample/Cantons.shp")?;
+let lakes = io::read_layer("testdata/scapetoad-sample/Lakes.shp")?;
 
 let mut options = CartogramOptions::new("Pop2006");
 options.resolution = GridResolution::Quality(70);
@@ -130,5 +130,6 @@ bottom-left node.
 
 ## License
 
-GPL-2.0-or-later, like ScapeToad (this is a derivative work). Sample data in `testdata/`:
-Swiss cantons, Public Geodata License (see `testdata/License.txt`).
+GPL-2.0-or-later, like ScapeToad (this is a derivative work). Test data in `testdata/`
+(see its README): ScapeToad's Swiss cantons sample under the Public Geodata License, and
+Swiss boundaries and population from the OFS, free to use with attribution.

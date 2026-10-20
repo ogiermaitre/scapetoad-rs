@@ -9,7 +9,7 @@ use scapetoad::{
 
 fn data(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../testdata")
+        .join("../../testdata/scapetoad-sample")
         .join(name)
 }
 
