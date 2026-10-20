@@ -17,6 +17,16 @@ use crate::layer::{Crs, Feature, Field, FieldType, Layer, Value};
 const MAGIC: &[u8; 8] = b"STDFIELD";
 const FORMAT_VERSION: u32 = 1;
 
+/// Distance, in grid cells, under which a vertex counts as a duplicate of the previous one.
+const DUPLICATE_TOLERANCE: f64 = 1e-9;
+
+fn sub(p: Coord<f64>, q: Coord<f64>) -> Coord<f64> {
+    Coord {
+        x: p.x - q.x,
+        y: p.y - q.y,
+    }
+}
+
 /// Regular grid of `nx * ny` nodes spanning `envelope`, with the deformed position of each node.
 ///
 /// Node `(i, j)` starts at `envelope.min + (i * cell_w, j * cell_h)`; its deformed position is
@@ -98,7 +108,12 @@ impl DeformationField {
         )
     }
 
-    /// Projects one coordinate by bilinear interpolation in the deformed cell containing it.
+    /// Projects one coordinate through the deformed cell containing it.
+    ///
+    /// Each cell is split into two triangles along a diagonal (see [`Self::splits_along_ac`])
+    /// and mapped affinely on each. Unlike ScapeToad's bilinear interpolation, this keeps
+    /// straight segments straight inside a triangle, so as long as no triangle of the grid is
+    /// folded, the map is one-to-one and cannot make a valid geometry self-intersect.
     ///
     /// Points outside the envelope are extrapolated from the nearest border cell. ScapeToad
     /// scaled by `n / width` instead of `(n - 1) / width` here, which sampled the wrong cell
@@ -108,50 +123,123 @@ impl DeformationField {
         self.project_grid(gx, gy)
     }
 
+    /// Cell holding grid position `(gx, gy)`; border cells extend beyond the envelope.
+    fn cell_of(&self, gx: f64, gy: f64) -> (usize, usize) {
+        (
+            (gx.floor() as isize).clamp(0, self.nx as isize - 2) as usize,
+            (gy.floor() as isize).clamp(0, self.ny as isize - 2) as usize,
+        )
+    }
+
+    /// Whether cell `(i, j)`, with corners `a b c d` counter-clockwise from the lower left,
+    /// is split along `a–c` (the default) rather than `b–d`. The other diagonal is used when
+    /// it is the only one giving two unfolded triangles, which is the case of a non-convex
+    /// but unfolded cell.
+    fn splits_along_ac(&self, i: usize, j: usize) -> bool {
+        let a = self.node(i, j);
+        let b = self.node(i + 1, j);
+        let c = self.node(i + 1, j + 1);
+        let d = self.node(i, j + 1);
+        let cross = |p: Coord<f64>, q: Coord<f64>, r: Coord<f64>| {
+            (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
+        };
+        let ac_ok = cross(a, b, c) > 0.0 && cross(a, c, d) > 0.0;
+        let bd_ok = cross(a, b, d) > 0.0 && cross(b, c, d) > 0.0;
+        ac_ok || !bd_ok
+    }
+
     fn project_grid(&self, gx: f64, gy: f64) -> Coord<f64> {
-        let i = (gx.floor() as isize).clamp(0, self.nx as isize - 2) as usize;
-        let j = (gy.floor() as isize).clamp(0, self.ny as isize - 2) as usize;
+        let (i, j) = self.cell_of(gx, gy);
         let ti = gx - i as f64;
         let tj = gy - j as f64;
         let a = self.node(i, j);
         let b = self.node(i + 1, j);
         let c = self.node(i + 1, j + 1);
         let d = self.node(i, j + 1);
-        let (wa, wb, wc, wd) = (
-            (1.0 - ti) * (1.0 - tj),
-            ti * (1.0 - tj),
-            ti * tj,
-            (1.0 - ti) * tj,
-        );
+        // Origin and the images of the two local axes for the triangle holding the point.
+        let (o, ex, ey, si, sj) = if self.splits_along_ac(i, j) {
+            if ti >= tj {
+                (a, sub(b, a), sub(c, b), ti, tj)
+            } else {
+                (a, sub(c, d), sub(d, a), ti, tj)
+            }
+        } else if ti + tj <= 1.0 {
+            (a, sub(b, a), sub(d, a), ti, tj)
+        } else {
+            (c, sub(d, c), sub(b, c), 1.0 - ti, 1.0 - tj)
+        };
         Coord {
-            x: wa * a.x + wb * b.x + wc * c.x + wd * d.x,
-            y: wa * a.y + wb * b.y + wc * c.y + wd * d.y,
+            x: o.x + si * ex.x + sj * ey.x,
+            y: o.y + si * ex.y + sj * ey.y,
         }
     }
 
     /// Projects a coordinate sequence, inserting a vertex wherever a segment crosses a grid
-    /// line. Inside a cell the bilinear map bends straight lines, so without these extra
-    /// vertices long segments would cut across neighbouring cells and could self-intersect.
+    /// line or a cell's diagonal, so the output follows the piecewise-affine map exactly.
+    ///
+    /// Vertices closer than [`DUPLICATE_TOLERANCE`] cells to the previous one are dropped:
+    /// such near-duplicates (often left by GIS overlays) form zigzags a few ulps wide, which
+    /// rounding in the projection can turn into self-intersections.
     pub fn project_coords(&self, coords: &[Coord<f64>]) -> Vec<Coord<f64>> {
         let mut out = Vec::with_capacity(coords.len() * 2);
         let Some(&first) = coords.first() else {
             return out;
         };
-        out.push(self.project_coord(first));
+        let mut p = self.to_grid(first);
+        out.push(self.project_grid(p.0, p.1));
         let mut ts: Vec<f64> = Vec::new();
-        for w in coords.windows(2) {
-            let (p, q) = (self.to_grid(w[0]), self.to_grid(w[1]));
+        for (n, &c) in coords.iter().enumerate().skip(1) {
+            let q = self.to_grid(c);
+            let is_last = n + 1 == coords.len();
+            if (q.0 - p.0).abs().max((q.1 - p.1).abs()) < DUPLICATE_TOLERANCE {
+                if is_last && out.len() > 1 {
+                    // Keep the exact last vertex so closed rings stay closed.
+                    out.pop();
+                    out.push(self.project_grid(q.0, q.1));
+                }
+                continue;
+            }
             ts.clear();
+            ts.push(0.0);
             crossings(p.0, q.0, self.nx, &mut ts);
             crossings(p.1, q.1, self.ny, &mut ts);
+            ts.push(1.0);
             ts.sort_unstable_by(f64::total_cmp);
             ts.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
-            for &t in &ts {
-                out.push(self.project_grid(p.0 + t * (q.0 - p.0), p.1 + t * (q.1 - p.1)));
+            // Dedup may have dropped 1 in favour of a crossing just before it.
+            *ts.last_mut().expect("holds 0 and 1") = 1.0;
+            let at = |t: f64| (p.0 + t * (q.0 - p.0), p.1 + t * (q.1 - p.1));
+            for w in ts.windows(2) {
+                let (t0, t1) = (w[0], w[1]);
+                if let Some(t) = self.diagonal_crossing(at(t0), at(t1)) {
+                    let t = t0 + t * (t1 - t0);
+                    let (x, y) = at(t);
+                    out.push(self.project_grid(x, y));
+                }
+                let (x, y) = if t1 == 1.0 { q } else { at(t1) };
+                out.push(self.project_grid(x, y));
             }
-            out.push(self.project_grid(q.0, q.1));
+            p = q;
         }
         out
+    }
+
+    /// Parameter in (0, 1) where the piece `u -> v`, which lies within a single cell, strictly
+    /// crosses that cell's diagonal.
+    fn diagonal_crossing(&self, u: (f64, f64), v: (f64, f64)) -> Option<f64> {
+        let (i, j) = self.cell_of(0.5 * (u.0 + v.0), 0.5 * (u.1 + v.1));
+        let ac = self.splits_along_ac(i, j);
+        // Signed position relative to the diagonal, linear along the piece.
+        let side = |(x, y): (f64, f64)| {
+            let (ti, tj) = (x - i as f64, y - j as f64);
+            if ac {
+                ti - tj
+            } else {
+                ti + tj - 1.0
+            }
+        };
+        let (s0, s1) = (side(u), side(v));
+        ((s0 < 0.0 && s1 > 0.0) || (s0 > 0.0 && s1 < 0.0)).then(|| s0 / (s0 - s1))
     }
 
     fn project_line_string(&self, ls: &LineString<f64>) -> LineString<f64> {
@@ -468,6 +556,7 @@ fn read_f64(r: &mut impl Read) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geo::Validation;
 
     fn field() -> DeformationField {
         DeformationField::identity(Rect::new((0.0, 0.0), (10.0, 5.0)), 11, 6).unwrap()
@@ -491,12 +580,66 @@ mod tests {
     }
 
     #[test]
-    fn segments_get_a_vertex_at_each_grid_crossing() {
+    fn segments_get_a_vertex_at_each_grid_and_diagonal_crossing() {
         let f = field();
-        // From x=0.5 to x=3.5 at constant y crosses the lines x=1, 2, 3.
+        // From x=0.5 to x=3.5 at y=2.5 crosses the lines x=1, 2, 3 and, mid-cell, the
+        // diagonals of cells 1 and 2 (it starts exactly on the diagonal of cell 0).
         let out = f.project_coords(&[Coord { x: 0.5, y: 2.5 }, Coord { x: 3.5, y: 2.5 }]);
         let xs: Vec<f64> = out.iter().map(|c| c.x).collect();
-        assert_eq!(xs, vec![0.5, 1.0, 2.0, 3.0, 3.5]);
+        assert_eq!(xs, vec![0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]);
+    }
+
+    fn collinear(p: Coord<f64>, q: Coord<f64>, r: Coord<f64>) -> bool {
+        let cross = (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x);
+        cross.abs() < 1e-12
+    }
+
+    #[test]
+    fn straight_segments_stay_straight_within_a_triangle() {
+        // With a deformed node, bilinear interpolation would bend this segment; on the lower
+        // triangle of cell (3, 2) the map is affine.
+        let mut f = field();
+        f.set_node(4, 3, Coord { x: 4.6, y: 3.3 });
+        let pts =
+            [(3.2, 2.1), (3.5, 2.25), (3.8, 2.4)].map(|(x, y)| f.project_coord(Coord { x, y }));
+        assert!(collinear(pts[0], pts[1], pts[2]), "{pts:?}");
+    }
+
+    #[test]
+    fn non_convex_cell_is_split_along_its_valid_diagonal() {
+        // Pull corner b of cell (3, 2) inside the cell: a–c would fold, b–d does not.
+        let mut f = field();
+        f.set_node(4, 2, Coord { x: 3.3, y: 2.6 });
+        assert!(!f.splits_along_ac(3, 2));
+        // The cell maps one-to-one: a closed loop around its interior keeps its orientation.
+        let ring: Vec<Coord<f64>> = [(3.1, 2.1), (3.9, 2.1), (3.9, 2.9), (3.1, 2.9), (3.1, 2.1)]
+            .map(|(x, y)| Coord { x, y })
+            .to_vec();
+        let out = LineString::new(f.project_coords(&ring));
+        assert!(Polygon::new(out, vec![]).is_valid());
+    }
+
+    #[test]
+    fn near_duplicate_vertices_are_dropped() {
+        let f = field();
+        let ring = [
+            Coord { x: 1.2, y: 1.2 },
+            Coord { x: 1.7, y: 1.2 },
+            Coord {
+                x: 1.7 + 1e-12,
+                y: 1.2,
+            },
+            Coord { x: 1.7, y: 1.7 },
+            Coord {
+                x: 1.2,
+                y: 1.2 + 1e-12,
+            },
+            Coord { x: 1.2, y: 1.2 },
+        ];
+        let out = f.project_coords(&ring);
+        // The first duplicate goes; the last vertex replaces the one just before it.
+        assert_eq!(out.len(), 4);
+        assert_eq!(out.first(), out.last());
     }
 
     #[test]

@@ -2,8 +2,9 @@
 //!
 //! The model is deliberately small so every format backend can map to and from it.
 
-use geo::BoundingRect;
+use geo::{BoundingRect, Validation};
 use geo_types::{Geometry, Rect};
+use rayon::prelude::*;
 
 use crate::error::{Error, Result};
 
@@ -163,6 +164,18 @@ impl Layer {
             .iter()
             .filter_map(|f| f.geometry.as_ref()?.bounding_rect())
             .reduce(|a, b| union_rect(&a, &b))
+    }
+
+    /// Indices of the features whose geometry is invalid under OGC rules (self-intersecting
+    /// rings, overlapping parts…). Such polygons are rasterised by the even-odd rule, and
+    /// their defects carry over to the cartogram.
+    pub fn invalid_features(&self) -> Vec<usize> {
+        self.features
+            .par_iter()
+            .enumerate()
+            .filter(|(_, f)| f.geometry.as_ref().is_some_and(|g| !g.is_valid()))
+            .map(|(k, _)| k)
+            .collect()
     }
 }
 

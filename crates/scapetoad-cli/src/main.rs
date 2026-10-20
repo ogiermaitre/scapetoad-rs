@@ -359,6 +359,15 @@ fn geometry_name(g: &scapetoad::geo_types::Geometry<f64>) -> &'static str {
 
 fn compute(args: ComputeArgs, outputs: &mut Outputs) -> Result<()> {
     let master = read(&args.master)?;
+    let invalid = master.invalid_features();
+    if !invalid.is_empty() {
+        eprintln!(
+            "warning: {} has {} invalid geometries (feature index from 0: {}); they are rasterised by the even-odd rule and their defects carry over to the output. Repair them first (e.g. make_valid) for exact areas.",
+            args.master.display(),
+            invalid.len(),
+            scapetoad::cartogram::index_list(&invalid)
+        );
+    }
     let constrained: Vec<Layer> = args
         .constrained
         .iter()

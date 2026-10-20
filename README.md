@@ -33,8 +33,8 @@ scapetoad grid --field cantons.stdf -o grid50.geojson --lines 50
 scapetoad convert testdata/scapetoad-sample/Cantons.shp cantons.geojson
 ```
 
-`compute` prints ScapeToad's computation report (size error statistics, plus a count of
-invalid geometries before and after). Main options:
+`compute` prints ScapeToad's computation report (size error statistics, plus the invalid
+geometries before and after, by feature index). Main options:
 
 | Option | Meaning |
 |---|---|
@@ -136,8 +136,21 @@ and bias, Runge–Kutta diffusion, constrained deformation). These Java bugs are
 Other changes:
 
 - Diffusion stops when no node moves more than `tolerance` (1e-7 cells) instead of exactly
-  0, with an iteration cap and a time limit (ScapeToad declared a 3-hour limit but never
-  enforced it). On the sample data both criteria give identical results.
+  0, or as soon as the density spectrum shows that no node can move that far any more, with
+  an iteration cap and a time limit (ScapeToad declared a 3-hour limit but never enforced
+  it). The spectral test matters: once the density is flat, rounding noise in the transform
+  (larger for grid sizes the DCT cannot factor, like 1999 cells) leaves a tiny velocity
+  that the growing time step amplifies, and a displacement test alone then never ends while
+  the nodes drift into a broken grid.
+- Geometries are projected through the grid by splitting each cell into two triangles and
+  mapping each affinely, with a vertex added at every grid line and cell-diagonal crossing,
+  instead of ScapeToad's bilinear interpolation. Inside a cell, bilinear interpolation bends
+  straight edges, so edges closer than a fraction of a cell could cross; the piecewise-affine
+  map is one-to-one wherever the grid is not folded, so a valid polygon stays valid. Vertices
+  within 1e-9 cells of the previous one are dropped, since rounding could turn such
+  near-duplicates into self-intersections.
+- The report lists the invalid features (by index) besides counting them, and `compute`
+  warns up front when the master layer has invalid geometries.
 - Polygons are rasterised by scanline instead of one point-in-polygon test per cell, and the
   diffusion runs in parallel. The Swiss cantons sample takes about 1 s at quality 50.
 - Segment densification at grid-line crossings is kept; ScapeToad's separate
