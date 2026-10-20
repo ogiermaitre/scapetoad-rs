@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/scapetoad", "crates/scapetoad-cli"]
+members = ["crates/scapetoad", "crates/scapetoad-cli", "crates/scapetoad-py"]
+# The Python extension is built by maturin (see crates/scapetoad-py); a plain `cargo build`
+# or `cargo test` leaves it out so it needs no Python toolchain.
+default-members = ["crates/scapetoad", "crates/scapetoad-cli"]
 
 [workspace.package]
 version = "0.1.0"

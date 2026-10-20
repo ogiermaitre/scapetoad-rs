@@ -6,6 +6,7 @@ tool: it resizes the polygons of a map so their areas become proportional to a v
 
 - `crates/scapetoad`: the library.
 - `crates/scapetoad-cli`: the `scapetoad` command.
+- `crates/scapetoad-py`: Python bindings, built with maturin (see its [README](crates/scapetoad-py/README.md)).
 
 The computation produces a **deformation field**: a deformed grid that can be saved and
 applied later to any vector layer inside its envelope. Basemaps (roads, rivers, lakes,
