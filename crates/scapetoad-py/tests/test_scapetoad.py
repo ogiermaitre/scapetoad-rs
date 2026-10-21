@@ -121,6 +121,53 @@ def test_field_projection(carto: st.Cartogram, lakes: st.Layer) -> None:
     assert field.transform_wkb(lakes.to_wkb()) == moved.to_wkb()
 
 
+def test_project_points_accepts_pairs(carto: st.Cartogram) -> None:
+    field = carto.field
+    expected = [field.project(600000.0, 200000.0), field.project(650000.0, 180000.0)]
+    assert field.project_points([[600000.0, 200000.0], [650000, 180000]]) == expected
+    assert field.project_points(p for p in [(600000.0, 200000.0), (650000.0, 180000.0)]) == expected
+    assert field.project_points([]) == []
+    with pytest.raises(TypeError, match='point 1'):
+        field.project_points([(0.0, 0.0), (1.0, 2.0, 3.0)])
+    with pytest.raises(TypeError, match='point 0'):
+        field.project_points(['xy'])  # type: ignore[list-item]
+
+
+def test_project_points_accepts_arrays(carto: st.Cartogram) -> None:
+    """Issue #2: an (n, 2) array was rejected; it now gives an (n, 2) array back."""
+    np = pytest.importorskip('numpy')
+    field = carto.field
+    points = np.array([[600000.0, 200000.0], [650000.0, 180000.0], [700000.0, 250000.0]])
+    expected = np.array(field.project_points([tuple(p) for p in points.tolist()]))
+
+    projected = field.project_points(points)
+    assert isinstance(projected, np.ndarray)
+    assert projected.dtype == np.float64 and projected.shape == (3, 2)
+    assert np.array_equal(projected, expected)
+    projected[0, 0] = 0.0  # writable, not a view of read-only bytes
+
+    # Other dtypes and non-contiguous views go through the same path.
+    integers = points.astype(np.int64)
+    assert np.array_equal(
+        field.project_points(integers),
+        np.array(field.project_points([tuple(p) for p in integers.tolist()])),
+    )
+    assert not points[::2].flags['C_CONTIGUOUS']
+    assert np.array_equal(field.project_points(points[::2]), expected[::2])
+    assert field.project_points(np.empty((0, 2))).shape == (0, 2)
+    with pytest.raises(ValueError, match=r'shape \(n, 2\)'):
+        field.project_points(np.zeros((4, 3)))
+    with pytest.raises(ValueError, match=r'shape \(n, 2\)'):
+        field.project_points(np.zeros(2))
+
+
+def test_project_points_accepts_dataframes(carto: st.Cartogram) -> None:
+    pd = pytest.importorskip('pandas')
+    np = pytest.importorskip('numpy')
+    df = pd.DataFrame({'x': [600000.0, 650000.0], 'y': [200000.0, 180000.0]})
+    assert np.array_equal(carto.field.project_points(df), carto.field.project_points(df.to_numpy()))
+
+
 def test_identity_field_keeps_points() -> None:
     field = st.DeformationField.identity((0.0, 0.0, 10.0, 10.0), 11, 11)
     assert field.project(3.3, 7.1) == pytest.approx((3.3, 7.1))

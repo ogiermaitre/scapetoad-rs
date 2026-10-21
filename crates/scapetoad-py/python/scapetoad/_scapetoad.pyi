@@ -2,7 +2,15 @@
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from os import PathLike
-from typing import Any, Literal, final
+from typing import Any, Literal, Protocol, final, overload
+
+from numpy import float64
+from numpy.typing import NDArray
+
+class _SupportsArray(Protocol):
+    """What `project_points` treats as an array: numpy arrays, pandas and xarray objects."""
+
+    def __array__(self) -> Any: ...
 
 _Envelope = tuple[float, float, float, float]
 """`(min_x, min_y, max_x, max_y)`."""
@@ -117,8 +125,12 @@ class DeformationField:
     def node(self, i: int, j: int) -> tuple[float, float]:
         """Deformed position of node `(i, j)`, counted from the bottom-left corner."""
     def project(self, x: float, y: float) -> tuple[float, float]: ...
-    def project_points(self, points: Sequence[tuple[float, float]]) -> list[tuple[float, float]]:
-        """Projects `(x, y)` points; an `(n, 2)` numpy array works too."""
+    @overload
+    def project_points(self, points: _SupportsArray) -> NDArray[float64]:
+        """Projects an `(n, 2)` array-like (numpy array, DataFrame…) into an `(n, 2)` array."""
+    @overload
+    def project_points(self, points: Iterable[Sequence[float]]) -> list[tuple[float, float]]:
+        """Projects `(x, y)` pairs (tuples, lists…) into a list of tuples."""
     def transform_wkb(self, geometries: Iterable[bytes | None]) -> list[bytes | None]:
         """Projects WKB geometries, splitting segments at grid lines so they follow the deformation."""
     def transform_layer(self, layer: Layer) -> Layer:

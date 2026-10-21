@@ -3,9 +3,10 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-use pyo3::exceptions::{PyIndexError, PyValueError};
+use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyTuple};
+use pyo3::types::{PyByteArray, PyBytes, PyTuple};
+use pyo3::{intern, IntoPyObjectExt};
 use scapetoad::geo_types::{Coord, Geometry, Rect};
 use scapetoad::DeformationField;
 
@@ -108,17 +109,32 @@ impl PyField {
         (c.x, c.y)
     }
 
-    /// Projects a sequence of `(x, y)` points (an `(n, 2)` numpy array works too).
-    fn project_points(&self, py: Python<'_>, points: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
-        py.detach(|| {
-            points
-                .into_iter()
-                .map(|(x, y)| {
-                    let c = self.inner.project_coord(Coord { x, y });
+    /// Projects points. An array-like (anything with `__array__`: numpy array, DataFrame…)
+    /// of shape `(n, 2)` gives an `(n, 2)` float64 numpy array; any other iterable of
+    /// `(x, y)` pairs gives a list of tuples.
+    fn project_points<'py>(
+        &self,
+        py: Python<'py>,
+        points: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if points.hasattr(intern!(py, "__array__"))? {
+            return self.project_array(py, points);
+        }
+        let coords = points
+            .try_iter()?
+            .enumerate()
+            .map(|(k, item)| point_from_py(&item?, k))
+            .collect::<PyResult<Vec<Coord<f64>>>>()?;
+        let projected: Vec<(f64, f64)> = py.detach(|| {
+            coords
+                .iter()
+                .map(|&c| {
+                    let c = self.inner.project_coord(c);
                     (c.x, c.y)
                 })
                 .collect()
-        })
+        });
+        projected.into_bound_py_any(py)
     }
 
     /// Projects WKB geometries (`None` stays `None`); segments are split at grid lines so
@@ -158,4 +174,63 @@ impl PyField {
         let (x0, y0, x1, y1) = self.envelope();
         format!("DeformationField({nx}x{ny} nodes, envelope=({x0}, {y0}, {x1}, {y1}))")
     }
+}
+
+impl PyField {
+    /// Projects an `(n, 2)` array-like through its raw float64 bytes, so a large lattice
+    /// costs no Python object per point. PyO3's buffer API would avoid the `tobytes` copy,
+    /// but it needs the stable ABI of Python 3.11.
+    fn project_array<'py>(
+        &self,
+        py: Python<'py>,
+        points: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let numpy = py.import("numpy")?;
+        let float64 = numpy.getattr("float64")?;
+        let array = numpy.call_method1("ascontiguousarray", (points, &float64))?;
+        let shape: Vec<usize> = array.getattr("shape")?.extract()?;
+        if shape.len() != 2 || shape[1] != 2 {
+            return Err(PyValueError::new_err(format!(
+                "expected an array of shape (n, 2), got {shape:?}"
+            )));
+        }
+        let bytes = array.call_method0("tobytes")?;
+        let bytes = bytes.cast::<PyBytes>()?.as_bytes();
+        let out: Vec<u8> = py.detach(|| {
+            let mut out = Vec::with_capacity(bytes.len());
+            for point in bytes.chunks_exact(16) {
+                let (x, y) = point.split_at(8);
+                let c = self.inner.project_coord(Coord {
+                    x: f64::from_ne_bytes(x.try_into().expect("8 bytes")),
+                    y: f64::from_ne_bytes(y.try_into().expect("8 bytes")),
+                });
+                out.extend_from_slice(&c.x.to_ne_bytes());
+                out.extend_from_slice(&c.y.to_ne_bytes());
+            }
+            out
+        });
+        // A bytearray, unlike bytes, gives a writable array.
+        numpy
+            .call_method1("frombuffer", (PyByteArray::new(py, &out), float64))?
+            .call_method1("reshape", (shape[0], 2))
+    }
+}
+
+/// Reads one `(x, y)` pair: a tuple, or any sequence of two numbers.
+fn point_from_py(item: &Bound<'_, PyAny>, index: usize) -> PyResult<Coord<f64>> {
+    if let Ok((x, y)) = item.extract::<(f64, f64)>() {
+        return Ok(Coord { x, y });
+    }
+    let pair = || -> PyResult<Coord<f64>> {
+        if item.len()? != 2 {
+            return Err(PyValueError::new_err("not a pair"));
+        }
+        Ok(Coord {
+            x: item.get_item(0)?.extract()?,
+            y: item.get_item(1)?.extract()?,
+        })
+    };
+    pair().map_err(|_| {
+        PyTypeError::new_err(format!("point {index}: expected an (x, y) pair of numbers"))
+    })
 }
