@@ -149,6 +149,18 @@ impl Layer {
             .collect())
     }
 
+    /// Indices of the features whose attribute holds no usable number: null, text that does
+    /// not parse, NaN or infinite. A cartogram counts them as 0.
+    pub fn features_without_value(&self, name: &str) -> Result<Vec<usize>> {
+        Ok(self
+            .numeric_values(name)?
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| !v.is_some_and(f64::is_finite))
+            .map(|(k, _)| k)
+            .collect())
+    }
+
     /// Whether every coordinate lies within longitude/latitude bounds (±180, ±90). For a
     /// layer without a CRS this is a hint, not proof: a small projected layer near the
     /// origin passes too, so use it to warn rather than to assume a CRS.

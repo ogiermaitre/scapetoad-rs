@@ -93,6 +93,13 @@ impl PyReport {
         self.inner.feature_count
     }
 
+    /// Indices of the master features without a usable number (null, text that does not
+    /// parse, NaN or infinite); they count as 0.
+    #[getter]
+    fn no_value(&self) -> Vec<usize> {
+        self.inner.no_value.clone()
+    }
+
     #[getter]
     fn value_mean(&self) -> f64 {
         self.inner.value_mean

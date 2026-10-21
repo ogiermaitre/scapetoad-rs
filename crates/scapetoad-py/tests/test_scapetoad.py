@@ -245,3 +245,13 @@ def test_corrupt_field_raises_scapetoad_error(carto: st.Cartogram) -> None:
 def test_options_out_of_range_raise_value_error(cantons: st.Layer, option: dict[str, float]) -> None:
     with pytest.raises(ValueError, match=next(iter(option))):
         st.compute(cantons, 'Pop2006', quality=0, **option)  # type: ignore[arg-type]
+
+
+def test_features_without_a_number_are_reported(cantons: st.Layer) -> None:
+    pop: list[str | None] = [str(v) for v in cantons.column('Pop2006')]
+    pop[1:4] = ["1'234", '12,5', None]
+    layer = st.Layer.from_wkb(cantons.to_wkb(), {'pop': pop})
+    carto = st.compute(layer, 'pop', quality=0)
+    assert carto.report.no_value == [1, 2, 3]
+    assert carto.masses[1:4] == [0.0, 0.0, 0.0]
+    assert 'without a numeric value' in str(carto.report)

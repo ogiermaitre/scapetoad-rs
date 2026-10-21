@@ -148,6 +148,8 @@ class Report:
     grid_size: tuple[int, int]
     bias: float
     feature_count: int
+    no_value: list[int]
+    """Indices of the master features without a usable number (null, unparsable text, NaN); they count as 0."""
     value_mean: float
     value_min: float
     value_max: float

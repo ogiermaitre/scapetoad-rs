@@ -253,6 +253,9 @@ pub struct Report {
     pub grid_size: (usize, usize),
     pub bias: f64,
     pub feature_count: usize,
+    /// Indices of the master features whose attribute holds no usable number (null, text
+    /// that does not parse, NaN or infinite). They count as 0, as in ScapeToad.
+    pub no_value: Vec<usize>,
     pub value_mean: f64,
     pub value_min: f64,
     pub value_max: f64,
@@ -295,6 +298,14 @@ impl fmt::Display for Report {
         writeln!(f, "Bias value: {}\n", self.bias)?;
         writeln!(f, "CARTOGRAM LAYER & ATTRIBUTE STATISTICS:")?;
         writeln!(f, "Number of features: {}", self.feature_count)?;
+        if !self.no_value.is_empty() {
+            writeln!(
+                f,
+                "Features without a numeric value, counted as 0: {} (feature index from 0: {})",
+                self.no_value.len(),
+                index_list(&self.no_value)
+            )?;
+        }
         writeln!(f, "Attribute mean value: {}", self.value_mean)?;
         writeln!(f, "Attribute minimum value: {}", self.value_min)?;
         writeln!(f, "Attribute maximum value: {}\n", self.value_max)?;
@@ -374,8 +385,9 @@ pub fn index_list(indices: &[usize]) -> String {
     s
 }
 
-/// Attribute values after cleaning: nulls/NaN become 0 (as in ScapeToad) and the missing
-/// value marker becomes the mean of the other values.
+/// Attribute values after cleaning: nulls, text that does not parse and non-finite values
+/// become 0 (as in ScapeToad; [`Report::no_value`] lists them), and the missing value marker
+/// becomes the mean of the other values.
 fn clean_values(layer: &Layer, options: &CartogramOptions) -> Result<Vec<f64>> {
     let raw = layer.numeric_values(&options.attribute)?;
     if !layer.features.is_empty() && raw.iter().all(Option::is_none) {
@@ -459,6 +471,7 @@ fn compute(builder: CartogramBuilder<'_>, progress: &mut dyn FnMut(Progress)) ->
 
     // *** Values, areas and densities ***
     let values = clean_values(master, &options)?;
+    let no_value = master.features_without_value(&options.attribute)?;
     let areas: Vec<f64> = master
         .features
         .iter()
@@ -595,6 +608,7 @@ fn compute(builder: CartogramBuilder<'_>, progress: &mut dyn FnMut(Progress)) ->
         grid_size: (nx, ny),
         bias: options.bias,
         feature_count: master.features.len(),
+        no_value,
         value_mean,
         value_min: values.iter().copied().fold(f64::INFINITY, f64::min),
         value_max: values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
@@ -672,6 +686,30 @@ mod tests {
         options.missing_value = Some(-1.0);
         let vals = clean_values(&layer, &options).unwrap();
         assert_eq!(vals, vec![70.0, 30.0, 10.0, 10.0]);
+    }
+
+    #[test]
+    fn features_without_a_number_are_reported() {
+        let mut layer = block();
+        layer.fields[0].kind = FieldType::Text;
+        let texts = ["70", "1'234", "12,5", "10"];
+        for (feat, text) in layer.features.iter_mut().zip(texts) {
+            feat.values[0] = Value::Text(text.into());
+        }
+        layer.features[3].values[0] = Value::Null;
+        // A coarse grid: three empty squares out of four make a slow diffusion.
+        let mut options = CartogramOptions::new("pop");
+        options.resolution = GridResolution::Nodes(33);
+        let carto = Cartogram::builder(&layer, options).run().unwrap();
+        assert_eq!(carto.report.no_value, vec![1, 2, 3]);
+        assert_eq!(carto.masses, vec![70.0, 0.0, 0.0, 0.0]);
+        let text = carto.report.to_string();
+        assert!(
+            text.contains(
+                "Features without a numeric value, counted as 0: 3 (feature index from 0: 1, 2, 3)"
+            ),
+            "{text}"
+        );
     }
 
     #[test]
