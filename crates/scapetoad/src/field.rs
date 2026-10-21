@@ -463,7 +463,18 @@ impl DeformationField {
     /// Layout: magic `STDFIELD`, u32 version, u32 nx, u32 ny, 4×f64 envelope
     /// (min x, min y, max x, max y), i32 EPSG (0 = none), u32 WKT length + UTF-8 WKT,
     /// then nx·ny f64 x coordinates and nx·ny f64 y coordinates, row by row from the bottom.
-    pub fn read_from(mut r: impl Read) -> Result<Self> {
+    ///
+    /// Malformed input (truncated, inconsistent sizes, non-finite values) gives
+    /// [`Error::InvalidField`]; sizes are checked against the data actually present before
+    /// anything large is allocated.
+    pub fn read_from(r: impl Read) -> Result<Self> {
+        Self::read_unchecked(r).map_err(|e| match e {
+            Error::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => truncated(),
+            e => e,
+        })
+    }
+
+    fn read_unchecked(mut r: impl Read) -> Result<Self> {
         let mut magic = [0u8; 8];
         r.read_exact(&mut magic)?;
         if &magic != MAGIC {
@@ -480,33 +491,36 @@ impl DeformationField {
         if nx < 3 || ny < 3 {
             return Err(Error::GridTooSmall(nx, ny));
         }
-        let (x0, y0, x1, y1) = (
-            read_f64(&mut r)?,
-            read_f64(&mut r)?,
-            read_f64(&mut r)?,
-            read_f64(&mut r)?,
+        let envelope = Rect::new(
+            (read_f64(&mut r)?, read_f64(&mut r)?),
+            (read_f64(&mut r)?, read_f64(&mut r)?),
         );
+        check_envelope(&envelope)?;
         let mut buf4 = [0u8; 4];
         r.read_exact(&mut buf4)?;
         let epsg = i32::from_le_bytes(buf4);
         let wkt_len = read_u32(&mut r)? as usize;
-        let mut wkt = vec![0u8; wkt_len];
-        r.read_exact(&mut wkt)?;
+        let wkt = read_bytes(&mut r, wkt_len)?;
         let wkt = String::from_utf8(wkt).map_err(|e| Error::InvalidField(e.to_string()))?;
         let crs = (epsg != 0 || !wkt.is_empty()).then(|| Crs {
             epsg: (epsg != 0).then_some(epsg),
             wkt: (!wkt.is_empty()).then_some(wkt),
         });
-        let n = nx * ny;
-        let mut bytes = vec![0u8; 2 * n * 8];
-        r.read_exact(&mut bytes)?;
+        let (n, len) = nx
+            .checked_mul(ny)
+            .and_then(|n| Some((n, n.checked_mul(16)?)))
+            .ok_or_else(|| Error::InvalidField(format!("a {nx}x{ny} grid is too large")))?;
+        let bytes = read_bytes(&mut r, len)?;
         let mut vals = bytes
             .chunks_exact(8)
             .map(|b| f64::from_le_bytes(b.try_into().expect("chunk of 8")));
         let xs: Vec<f64> = vals.by_ref().take(n).collect();
         let ys: Vec<f64> = vals.collect();
+        if !xs.iter().chain(&ys).all(|v| v.is_finite()) {
+            return Err(Error::InvalidField("non-finite node coordinates".into()));
+        }
         Ok(Self {
-            envelope: Rect::new((x0, y0), (x1, y1)),
+            envelope,
             nx,
             ny,
             xs,
@@ -539,6 +553,35 @@ fn crossings(a: f64, b: f64, n: usize, ts: &mut Vec<f64>) {
             ts.push(t);
         }
     }
+}
+
+/// Rejects an envelope that cannot carry a grid: non-finite, or without width or height.
+fn check_envelope(env: &Rect<f64>) -> Result<()> {
+    let (min, max) = (env.min(), env.max());
+    let finite = [min.x, min.y, max.x, max.y].iter().all(|v| v.is_finite());
+    if finite && max.x > min.x && max.y > min.y {
+        Ok(())
+    } else {
+        Err(Error::InvalidField(format!(
+            "the envelope ({}, {}, {}, {}) must be finite, with a positive width and height",
+            min.x, min.y, max.x, max.y
+        )))
+    }
+}
+
+fn truncated() -> Error {
+    Error::InvalidField("the file ends early".into())
+}
+
+/// Reads exactly `len` bytes. The buffer grows with the data actually read, so a corrupt
+/// length in a short file is an error rather than a huge allocation.
+fn read_bytes(r: &mut impl Read, len: usize) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    r.take(len as u64).read_to_end(&mut buf)?;
+    if buf.len() < len {
+        return Err(truncated());
+    }
+    Ok(buf)
 }
 
 fn read_u32(r: &mut impl Read) -> Result<u32> {
@@ -666,5 +709,46 @@ mod tests {
         let mut buf = Vec::new();
         f.write_to(&mut buf).unwrap();
         assert_eq!(DeformationField::read_from(buf.as_slice()).unwrap(), f);
+    }
+
+    /// File header up to the WKT, which is left out like the node coordinates.
+    fn header(nx: u32, ny: u32, envelope: [f64; 4], wkt_len: u32) -> Vec<u8> {
+        let mut h = MAGIC.to_vec();
+        for v in [FORMAT_VERSION, nx, ny] {
+            h.extend(v.to_le_bytes());
+        }
+        for v in envelope {
+            h.extend(v.to_le_bytes());
+        }
+        h.extend(0i32.to_le_bytes());
+        h.extend(wkt_len.to_le_bytes());
+        h
+    }
+
+    #[test]
+    fn malformed_files_are_errors() {
+        let unit = [0.0, 0.0, 1.0, 1.0];
+        let mut valid = Vec::new();
+        field().write_to(&mut valid).unwrap();
+        let mut nan_node = valid.clone();
+        let last = valid.len() - 8;
+        nan_node[last..].copy_from_slice(&f64::NAN.to_le_bytes());
+        let cases = [
+            ("truncated header", valid[..30].to_vec()),
+            ("truncated nodes", valid[..valid.len() - 1].to_vec()),
+            ("grid size overflowing", header(u32::MAX, u32::MAX, unit, 0)),
+            ("large grid, no data", header(1 << 20, 1 << 20, unit, 0)),
+            ("large WKT, no data", header(3, 3, unit, u32::MAX)),
+            ("empty envelope", header(3, 3, [1.0, 0.0, 1.0, 1.0], 0)),
+            ("NaN envelope", header(3, 3, [f64::NAN, 0.0, 1.0, 1.0], 0)),
+            ("NaN node", nan_node),
+        ];
+        for (what, bytes) in cases {
+            let res = DeformationField::read_from(bytes.as_slice());
+            assert!(
+                matches!(res, Err(Error::InvalidField(_))),
+                "{what}: {res:?}"
+            );
+        }
     }
 }

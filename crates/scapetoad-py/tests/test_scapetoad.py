@@ -1,6 +1,7 @@
 """Tests of the Python bindings on ScapeToad's Swiss cantons sample."""
 
 import pickle
+import struct
 from pathlib import Path
 
 import pytest
@@ -227,3 +228,12 @@ def test_transform_geodataframe_keeps_index(carto: st.Cartogram, lakes: st.Layer
     assert list(moved.index) == list(gdf.index)
     assert not moved.geometry.geom_equals(gdf.geometry).any()
     assert list(moved.geometry.to_wkb()) == carto.field.transform_layer(lakes).to_wkb()
+
+
+def test_corrupt_field_raises_scapetoad_error(carto: st.Cartogram) -> None:
+    data = carto.field.to_bytes()
+    # Grid size at bytes 12..20: a size that overflows must not panic (PanicException).
+    oversized = data[:12] + struct.pack('<II', 0xFFFFFFFF, 0xFFFFFFFF) + data[20:]
+    for bad in (data[:30], data[:-1], oversized):
+        with pytest.raises(st.ScapeToadError):
+            st.DeformationField.from_bytes(bad)
