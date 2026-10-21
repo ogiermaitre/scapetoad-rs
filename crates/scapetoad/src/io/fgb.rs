@@ -141,6 +141,9 @@ fn geometry_type(layer: &Layer) -> GeometryType {
 pub(super) fn write(layer: &Layer, path: &Path) -> Result<()> {
     let wkt = layer.crs.as_ref().and_then(|c| c.wkt.as_deref());
     let options = FgbWriterOptions {
+        // The spatial index would sort the features along a Hilbert curve; outputs keep the
+        // input order so feature indices (report, size errors) match the file.
+        write_index: false,
         crs: FgbCrs {
             code: layer.crs.as_ref().and_then(|c| c.epsg).unwrap_or(0),
             wkt,

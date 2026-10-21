@@ -78,5 +78,5 @@ Without geopandas, geometries go in and out as WKB: `Layer.from_wkb(wkb_list, co
 | `Report`, `ErrorSummary`, `Progress` | computation report, size error statistics, callback argument |
 | `ScapeToadError` | raised for library errors; I/O errors raise `OSError` |
 
-FlatGeobuf output is written with a spatial index, which reorders the features. Use GeoJSON,
-GeoPackage or Shapefile when the order matters (for example, to match `size_errors`).
+Every format keeps the features in their input order (FlatGeobuf is written without a spatial
+index), so written layers match `masses`, `size_errors` and the indices in the report.

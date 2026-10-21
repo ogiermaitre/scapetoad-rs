@@ -85,6 +85,9 @@ Geometries are [`geo-types`](https://docs.rs/geo-types) (re-exported as
 Multi-layer sources take a layer name after `#`: `data.gpkg#roads`. Writing to an existing
 GeoPackage adds or replaces that layer.
 
+Every format keeps the features in their input order, which the report's feature indices
+rely on: FlatGeobuf is written without a spatial index, which would sort them.
+
 A TopoJSON file stores each border once, even when it is shared by two features or by two
 layers (a commune and its canton), so all its layers are written together. The command
 collects every output aimed at the same `.topojson` file and writes it at the end:

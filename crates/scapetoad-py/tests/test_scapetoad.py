@@ -169,14 +169,15 @@ def test_from_wkb_rejects_bad_input(cantons: st.Layer) -> None:
         st.Layer.from_wkb(wkb, {'a': [1, object()]})  # type: ignore[list-item]
 
 
-def test_write_and_read_back(carto: st.Cartogram, tmp_path: Path) -> None:
-    # GeoJSON keeps the feature order; FlatGeobuf sorts features for its spatial index.
-    out = tmp_path / 'cantons.geojson'
+@pytest.mark.parametrize('ext', ['geojson', 'fgb', 'shp'])
+def test_write_and_read_back(carto: st.Cartogram, tmp_path: Path, ext: str) -> None:
+    # Every format keeps the feature order, which size_errors and the report rely on.
+    out = tmp_path / f'cantons.{ext}'
     carto.master.write(out)
     back = st.read_layer(out)
     assert len(back) == len(carto.master)
     assert back.column('Pop2006') == carto.master.column('Pop2006')
-    # No `crs` member and LV03 coordinates: the CRS stays unknown rather than WGS 84.
+    # The sample has no .prj and LV03 coordinates: no format may make up a CRS.
     assert back.crs is None
 
 

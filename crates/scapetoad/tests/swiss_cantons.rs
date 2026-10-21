@@ -71,20 +71,15 @@ fn population_cartogram_is_accurate_and_valid() {
     assert_eq!(reloaded.transform_layer(&lakes), moved);
 }
 
-/// Same schema and features. FlatGeobuf reorders features along its spatial index, so the
-/// features are compared in a canonical order.
+/// Same schema and features, in the same order: every format must keep the input order, since
+/// the report and the size errors refer to features by index.
 fn same_content(a: &Layer, b: &Layer) {
     assert_eq!(a.features.len(), b.features.len());
     assert_eq!(
         a.fields.iter().map(|f| &f.name).collect::<Vec<_>>(),
         b.fields.iter().map(|f| &f.name).collect::<Vec<_>>()
     );
-    let sorted = |l: &Layer| {
-        let mut feats = l.features.clone();
-        feats.sort_by_cached_key(|f| format!("{:?}", f.values));
-        feats
-    };
-    for (fa, fb) in sorted(a).iter().zip(&sorted(b)) {
+    for (fa, fb) in a.features.iter().zip(&b.features) {
         assert_eq!(fa.values, fb.values);
         assert_eq!(
             fa.geometry.clone().map(single),
