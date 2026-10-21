@@ -148,6 +148,8 @@ class Report:
     grid_size: tuple[int, int]
     bias: float
     feature_count: int
+    no_value: list[int]
+    """Indices of the master features without a usable number (null, unparsable text, NaN); they count as 0."""
     value_mean: float
     value_min: float
     value_max: float
@@ -238,13 +240,18 @@ def compute(
         quality: 0–100, a grid of `250 + 15·quality` nodes along the longer side (default 50).
         nodes: explicit number of nodes along the longer side, instead of `quality`.
         missing_value: value marking missing data, replaced by the mean of the others.
-        margin: envelope margin on each side, as a fraction of the extent (default 0.2).
-        min_density: smallest non-zero cell density after rescaling (default 10).
-        bias: added to every cell so zero regions shrink without vanishing (default 1e-5).
-        tolerance: stop when no node moves more than this, in grid cells (default 1e-7).
+        margin: envelope margin on each side, as a fraction of the extent (≥ 0, default 0.2).
+        min_density: smallest non-zero cell density after rescaling (≥ 0, default 10).
+        bias: added to every cell so zero regions shrink without vanishing (> 0, default 1e-5).
+        tolerance: stop when no node moves more than this, in grid cells (≥ 0, default 1e-7).
         max_iterations: cap on integration steps (default 10 000).
         max_duration: time limit in seconds (default 3 hours, `math.inf` for none).
         constrain: layers whose shapes are kept where the master layer does not cover them.
         include: layers the envelope must cover, to transform them with the field later.
         progress: called at each step. Raising from it, or Ctrl-C, stops the computation.
+
+    Raises:
+        ValueError: an option out of its range.
+        ScapeToadError: the computation cannot run on this layer (attribute not found, no
+            positive value, non-finite coordinates…).
     """

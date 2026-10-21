@@ -368,6 +368,18 @@ fn compute(args: ComputeArgs, outputs: &mut Outputs) -> Result<()> {
             scapetoad::cartogram::index_list(&invalid)
         );
     }
+    // A missing attribute is reported by the computation itself.
+    if let Ok(no_value) = master.features_without_value(&args.attr) {
+        if !no_value.is_empty() {
+            eprintln!(
+                "warning: {} has {} features without a numeric value for '{}' (feature index from 0: {}); they count as 0",
+                args.master.display(),
+                no_value.len(),
+                args.attr,
+                scapetoad::cartogram::index_list(&no_value)
+            );
+        }
+    }
     let constrained: Vec<Layer> = args
         .constrained
         .iter()

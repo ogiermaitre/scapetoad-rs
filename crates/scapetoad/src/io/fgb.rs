@@ -8,8 +8,11 @@ use flatgeobuf::{
     ColumnType, FallibleStreamingIterator, FgbCrs, FgbReader, FgbWriter, FgbWriterOptions,
     GeometryType,
 };
+use geo::CoordsIter;
 use geo_types::Geometry;
-use geozero::{ColumnValue, FeatureProperties, PropertyProcessor, ToGeo};
+use geozero::{
+    ColumnValue, FeatureProperties, GeomProcessor, GeozeroGeometry, PropertyProcessor, ToGeo,
+};
 
 use super::stem;
 use crate::error::{Error, Result};
@@ -72,10 +75,14 @@ pub(super) fn read(path: &Path) -> Result<Layer> {
                 .collect()
         })
         .unwrap_or_default();
-    let crs = header.crs().map(|c| Crs {
-        epsg: (c.code() != 0).then_some(c.code()),
-        wkt: c.wkt().map(str::to_string),
-    });
+    // Our writer, like others, stores an empty CRS table for a layer without CRS.
+    let crs = header
+        .crs()
+        .map(|c| Crs {
+            epsg: (c.code() != 0).then_some(c.code()),
+            wkt: c.wkt().map(str::to_string),
+        })
+        .filter(|c| c.epsg.is_some() || c.wkt.is_some());
     let name = header
         .name()
         .filter(|n| !n.is_empty())
@@ -84,7 +91,8 @@ pub(super) fn read(path: &Path) -> Result<Layer> {
     let mut features = Vec::new();
     let mut iter = reader.select_all().map_err(err)?;
     while let Some(feat) = iter.next().map_err(err)? {
-        let geometry = feat.to_geo().ok();
+        // An empty geometry is how features without geometry are stored (see `NoGeometry`).
+        let geometry = feat.to_geo().ok().filter(|g| g.coords_count() > 0);
         let mut row = Row(vec![Value::Null; fields.len()]);
         feat.process_properties(&mut row).map_err(err)?;
         features.push(Feature {
@@ -137,6 +145,9 @@ fn geometry_type(layer: &Layer) -> GeometryType {
 pub(super) fn write(layer: &Layer, path: &Path) -> Result<()> {
     let wkt = layer.crs.as_ref().and_then(|c| c.wkt.as_deref());
     let options = FgbWriterOptions {
+        // The spatial index would sort the features along a Hilbert curve; outputs keep the
+        // input order so feature indices (report, size errors) match the file.
+        write_index: false,
         crs: FgbCrs {
             code: layer.crs.as_ref().and_then(|c| c.epsg).unwrap_or(0),
             wkt,
@@ -155,43 +166,59 @@ pub(super) fn write(layer: &Layer, path: &Path) -> Result<()> {
         };
         fgb.add_column(&field.name, ty, |_, col| col.nullable = true);
     }
-    for (k, feat) in layer.features.iter().enumerate() {
-        let geom = feat.geometry.clone().ok_or_else(|| Error::Format {
-            format: FORMAT,
-            message: format!("feature {k} has no geometry"),
-        })?;
-        let mut prop_err = None;
-        fgb.add_feature_geom(geom, |fw| {
-            for (i, (field, v)) in layer.fields.iter().zip(&feat.values).enumerate() {
-                // Values follow the column type, whatever variant they were stored as.
-                let text;
-                let cv = match (field.kind, v) {
-                    (_, Value::Null) => continue,
-                    (FieldType::Bool, Value::Bool(b)) => ColumnValue::Bool(*b),
-                    (FieldType::Int, Value::Int(x)) => ColumnValue::Long(*x),
-                    (FieldType::Int, v) => match v.as_f64() {
-                        Some(x) => ColumnValue::Long(x.round() as i64),
-                        None => continue,
-                    },
-                    (FieldType::Float, v) => match v.as_f64() {
-                        Some(x) => ColumnValue::Double(x),
-                        None => continue,
-                    },
-                    (FieldType::Text, Value::Text(s)) => ColumnValue::String(s),
-                    (FieldType::Text | FieldType::Bool, v) => {
-                        text = v.to_string();
-                        ColumnValue::String(&text)
-                    }
-                };
-                if let Err(e) = fw.property(i, &field.name, &cv) {
-                    prop_err.get_or_insert(e);
-                }
-            }
-        })
-        .map_err(err)?;
-        if let Some(e) = prop_err {
-            return Err(err(e));
+    for feat in &layer.features {
+        match &feat.geometry {
+            Some(g) => add_feature(&mut fgb, layer, feat, g.clone())?,
+            None => add_feature(&mut fgb, layer, feat, NoGeometry)?,
         }
     }
     fgb.write(BufWriter::new(File::create(path)?)).map_err(err)
+}
+
+/// A feature without geometry. The writer always stores a geometry table, so the feature
+/// gets an empty one, which reads back as no geometry.
+struct NoGeometry;
+
+impl GeozeroGeometry for NoGeometry {
+    fn process_geom<P: GeomProcessor>(&self, _processor: &mut P) -> geozero::error::Result<()> {
+        Ok(())
+    }
+}
+
+fn add_feature(
+    fgb: &mut FgbWriter,
+    layer: &Layer,
+    feat: &Feature,
+    geom: impl GeozeroGeometry,
+) -> Result<()> {
+    let mut prop_err = None;
+    fgb.add_feature_geom(geom, |fw| {
+        for (i, (field, v)) in layer.fields.iter().zip(&feat.values).enumerate() {
+            // Values follow the column type, whatever variant they were stored as.
+            let text;
+            let cv = match (field.kind, v) {
+                (_, Value::Null) => continue,
+                (FieldType::Bool, Value::Bool(b)) => ColumnValue::Bool(*b),
+                (FieldType::Int, Value::Int(x)) => ColumnValue::Long(*x),
+                (FieldType::Int, v) => match v.as_f64() {
+                    Some(x) => ColumnValue::Long(x.round() as i64),
+                    None => continue,
+                },
+                (FieldType::Float, v) => match v.as_f64() {
+                    Some(x) => ColumnValue::Double(x),
+                    None => continue,
+                },
+                (FieldType::Text, Value::Text(s)) => ColumnValue::String(s),
+                (FieldType::Text | FieldType::Bool, v) => {
+                    text = v.to_string();
+                    ColumnValue::String(&text)
+                }
+            };
+            if let Err(e) = fw.property(i, &field.name, &cv) {
+                prop_err.get_or_insert(e);
+            }
+        }
+    })
+    .map_err(err)?;
+    prop_err.map_or(Ok(()), |e| Err(err(e)))
 }

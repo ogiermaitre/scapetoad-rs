@@ -1,5 +1,7 @@
 //! ESRI Shapefile (`.shp` + `.shx` + `.dbf`, optional `.prj`).
 
+use std::fs::File;
+use std::io::BufWriter;
 use std::path::Path;
 
 use geo_types::{Geometry, MultiLineString, MultiPoint, MultiPolygon};
@@ -242,43 +244,82 @@ pub(super) fn write(layer: &Layer, path: &Path) -> Result<()> {
         fam
     };
 
+    // Checked before any file is created. The shapefile crate writes every record with the
+    // header's shape type, so it has no way to store a null shape.
+    if let Some(k) = layer.features.iter().position(|f| f.geometry.is_none()) {
+        return Err(Error::Format {
+            format: FORMAT,
+            message: format!(
+                "feature {k} has no geometry, which this writer cannot store in a shapefile; use GeoPackage, GeoJSON, FlatGeobuf or TopoJSON"
+            ),
+        });
+    }
+
     let names = dbf_names(layer);
+    let mut widths = Vec::with_capacity(layer.fields.len());
     let mut builder = dbase::TableWriterBuilder::new();
-    for (field, name) in layer.fields.iter().zip(&names) {
+    for (k, (field, name)) in layer.fields.iter().zip(&names).enumerate() {
         let fname =
             dbase::FieldName::try_from(name.as_str()).map_err(|e| Error::format(FORMAT, e))?;
+        // Text columns are as wide as their longest value, up to dBase's 254 bytes.
+        let width = layer
+            .features
+            .iter()
+            .map(|f| match &f.values[k] {
+                Value::Text(s) => s.len(),
+                v => v.to_string().len(),
+            })
+            .max()
+            .unwrap_or(1)
+            .clamp(1, MAX_TEXT_BYTES);
+        widths.push(width);
         builder = match field.kind {
             FieldType::Bool => builder.add_logical_field(fname),
             FieldType::Int => builder.add_numeric_field(fname, 18, 0),
             FieldType::Float => builder.add_numeric_field(fname, 24, 10),
-            FieldType::Text => {
-                let k = layer.field_index(&field.name).expect("field of layer");
-                let len = layer
-                    .features
-                    .iter()
-                    .map(|f| match &f.values[k] {
-                        Value::Text(s) => s.len(),
-                        v => v.to_string().len(),
-                    })
-                    .max()
-                    .unwrap_or(1)
-                    .clamp(1, 254);
-                builder.add_character_field(fname, len as u8)
-            }
+            FieldType::Text => builder.add_character_field(fname, width as u8),
         };
     }
-    let mut writer =
-        shapefile::Writer::from_path(path, builder).map_err(|e| Error::format(FORMAT, e))?;
 
-    for (k, feat) in layer.features.iter().enumerate() {
-        let mut record = dbase::Record::default();
-        for ((field, name), value) in layer.fields.iter().zip(&names).zip(&feat.values) {
-            record.insert(name.clone(), to_field_value(value, field.kind));
+    let written = shapefile::Writer::from_path(path, builder)
+        .map_err(|e| Error::format(FORMAT, e))
+        .and_then(|mut writer| write_records(&mut writer, layer, fam, &names, &widths));
+    if written.is_err() {
+        // Don't leave a .shp whose records disagree with its .dbf.
+        for ext in ["shp", "shx", "dbf"] {
+            let _ = std::fs::remove_file(path.with_extension(ext));
         }
-        let geom = feat.geometry.as_ref().ok_or_else(|| Error::Format {
-            format: FORMAT,
-            message: format!("feature {k} has no geometry"),
-        })?;
+    }
+    written?;
+
+    if let Some(wkt) = layer.crs.as_ref().and_then(|c| c.wkt.as_deref()) {
+        std::fs::write(path.with_extension("prj"), wkt)?;
+    }
+    Ok(())
+}
+
+/// Longest text a dBase character column holds, in bytes.
+const MAX_TEXT_BYTES: usize = 254;
+
+/// Writes every feature; `widths` are the column widths, in bytes, for text values.
+fn write_records(
+    writer: &mut shapefile::Writer<BufWriter<File>>,
+    layer: &Layer,
+    fam: Family,
+    names: &[String],
+    widths: &[usize],
+) -> Result<()> {
+    for feat in &layer.features {
+        let mut record = dbase::Record::default();
+        for (((field, name), value), &width) in
+            layer.fields.iter().zip(names).zip(&feat.values).zip(widths)
+        {
+            record.insert(name.clone(), to_field_value(value, field.kind, width));
+        }
+        let geom = feat
+            .geometry
+            .as_ref()
+            .expect("null geometries rejected by the caller");
         let res = match fam {
             Family::Point => match geom {
                 Geometry::Point(p) => {
@@ -316,11 +357,6 @@ pub(super) fn write(layer: &Layer, path: &Path) -> Result<()> {
         };
         res.map_err(|e| Error::format(FORMAT, e))?;
     }
-    drop(writer);
-
-    if let Some(wkt) = layer.crs.as_ref().and_then(|c| c.wkt.as_deref()) {
-        std::fs::write(path.with_extension("prj"), wkt)?;
-    }
     Ok(())
 }
 
@@ -352,7 +388,9 @@ fn dbf_names(layer: &Layer) -> Vec<String> {
     names
 }
 
-fn to_field_value(v: &Value, kind: FieldType) -> FieldValue {
+/// dBase value for a column of type `kind`; text is cut to `width` bytes, on a character
+/// boundary, as GDAL does for values longer than a dBase column can hold.
+fn to_field_value(v: &Value, kind: FieldType, width: usize) -> FieldValue {
     match kind {
         FieldType::Bool => FieldValue::Logical(match v {
             Value::Bool(b) => Some(*b),
@@ -361,7 +399,15 @@ fn to_field_value(v: &Value, kind: FieldType) -> FieldValue {
         FieldType::Int | FieldType::Float => FieldValue::Numeric(v.as_f64()),
         FieldType::Text => FieldValue::Character(match v {
             Value::Null => None,
-            v => Some(v.to_string()),
+            v => {
+                let mut s = v.to_string();
+                let mut end = s.len().min(width);
+                while !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                s.truncate(end);
+                Some(s)
+            }
         }),
     }
 }

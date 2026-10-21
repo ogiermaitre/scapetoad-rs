@@ -71,20 +71,15 @@ fn population_cartogram_is_accurate_and_valid() {
     assert_eq!(reloaded.transform_layer(&lakes), moved);
 }
 
-/// Same schema and features. FlatGeobuf reorders features along its spatial index, so the
-/// features are compared in a canonical order.
+/// Same schema and features, in the same order: every format must keep the input order, since
+/// the report and the size errors refer to features by index.
 fn same_content(a: &Layer, b: &Layer) {
     assert_eq!(a.features.len(), b.features.len());
     assert_eq!(
         a.fields.iter().map(|f| &f.name).collect::<Vec<_>>(),
         b.fields.iter().map(|f| &f.name).collect::<Vec<_>>()
     );
-    let sorted = |l: &Layer| {
-        let mut feats = l.features.clone();
-        feats.sort_by_cached_key(|f| format!("{:?}", f.values));
-        feats
-    };
-    for (fa, fb) in sorted(a).iter().zip(&sorted(b)) {
+    for (fa, fb) in a.features.iter().zip(&b.features) {
         assert_eq!(fa.values, fb.values);
         assert_eq!(
             fa.geometry.clone().map(single),
@@ -116,7 +111,105 @@ fn formats_round_trip() {
         io::write_layer(&cantons, &path).unwrap();
         let back = io::read_layer(&path).unwrap();
         same_content(&cantons, &back);
+        // The sample has no .prj: no format may invent a CRS for it.
+        assert_eq!(back.crs, None, "{ext}");
     }
+}
+
+/// Unit squares in a row, one per value of a text attribute `name`.
+fn squares(geometries: &[bool], names: &[&str]) -> Layer {
+    use scapetoad::geo_types::polygon;
+    use scapetoad::{Feature, Field, FieldType, Value};
+    let mut layer = Layer::new("squares", vec![Field::new("name", FieldType::Text)]);
+    for (k, (&has_geometry, name)) in geometries.iter().zip(names).enumerate() {
+        let x = 2.0 * k as f64;
+        layer.features.push(Feature {
+            geometry: has_geometry.then(|| {
+                Geometry::Polygon(polygon![
+                    (x: x, y: 0.0), (x: x + 1.0, y: 0.0), (x: x + 1.0, y: 1.0), (x: x, y: 1.0)
+                ])
+            }),
+            values: vec![Value::Text(name.to_string())],
+        });
+    }
+    layer
+}
+
+#[test]
+fn shapefile_text_is_cut_at_254_bytes() {
+    use scapetoad::Value;
+    // 200 two-byte characters: the cut must fall between two of them.
+    let long = "é".repeat(200);
+    let layer = squares(&[true, true], &[&long, "short"]);
+    let path = tmp("long_text.shp");
+    io::write_layer(&layer, &path).unwrap();
+    let back = io::read_layer(&path).unwrap();
+    assert_eq!(
+        back.features[0].values[0],
+        Value::Text("é".repeat(127)),
+        "254 bytes"
+    );
+    assert_eq!(back.features[1].values[0], Value::Text("short".into()));
+}
+
+#[test]
+fn features_without_geometry() {
+    let layer = squares(&[true, false, true], &["a", "b", "c"]);
+    // FlatGeobuf keeps them, in place.
+    let path = tmp("null_geometry.fgb");
+    io::write_layer(&layer, &path).unwrap();
+    let back = io::read_layer(&path).unwrap();
+    assert_eq!(
+        back.features
+            .iter()
+            .map(|f| f.geometry.is_some())
+            .collect::<Vec<_>>(),
+        [true, false, true]
+    );
+    same_content(&layer, &back);
+    // The shapefile writer cannot store them: an error, and no partial file left behind.
+    let path = tmp("null_geometry.shp");
+    let err = io::write_layer(&layer, &path).unwrap_err();
+    assert!(
+        err.to_string().contains("feature 1 has no geometry"),
+        "{err}"
+    );
+    for ext in ["shp", "shx", "dbf"] {
+        assert!(!path.with_extension(ext).exists(), "{ext} left behind");
+    }
+}
+
+#[test]
+fn geojson_assumes_wgs84_only_for_lonlat_coordinates() {
+    use scapetoad::geo_types::{polygon, Geometry};
+    use scapetoad::{Crs, Feature, Layer};
+    let epsg = |code| {
+        Some(Crs {
+            epsg: Some(code),
+            wkt: None,
+        })
+    };
+    let round_trip = |layer: &Layer, name: &str| {
+        let path = tmp(name);
+        io::write_layer(layer, &path).unwrap();
+        io::read_layer(&path).unwrap().crs
+    };
+
+    // Projected coordinates without a `crs` member: unknown, not WGS 84.
+    let mut cantons = io::read_layer(data("Cantons.shp")).unwrap();
+    assert_eq!(round_trip(&cantons, "lv03_no_crs.geojson"), None);
+    // A known EPSG code travels in the `crs` member.
+    cantons.crs = epsg(21781);
+    assert_eq!(round_trip(&cantons, "lv03.geojson"), epsg(21781));
+    // Longitude/latitude coordinates without a `crs` member: RFC 7946's WGS 84.
+    let mut lonlat = Layer::new("lonlat", Vec::new());
+    lonlat.features.push(Feature {
+        geometry: Some(Geometry::Polygon(polygon![
+            (x: 5.9, y: 45.8), (x: 10.5, y: 45.8), (x: 10.5, y: 47.8), (x: 5.9, y: 47.8)
+        ])),
+        values: Vec::new(),
+    });
+    assert_eq!(round_trip(&lonlat, "lonlat.geojson"), epsg(4326));
 }
 
 #[cfg(feature = "gdal")]

@@ -1,7 +1,7 @@
 //! Polygon rasterisation onto the cartogram cells.
 
-use geo::{BoundingRect, Intersects};
-use geo_types::{Coord, Geometry, Polygon, Rect};
+use geo::{BoundingRect, LinesIter};
+use geo_types::{Coord, Geometry, LineString, Polygon};
 
 /// The undeformed cells of the cartogram grid: `cnx × cny` cells starting at `origin`.
 #[derive(Debug, Clone, Copy)]
@@ -66,34 +66,96 @@ impl Cells {
         }
     }
 
-    /// Calls `f(cell index)` for every cell whose rectangle intersects `geom`.
+    /// Calls `f(cell index)` for every cell whose (closed) rectangle intersects `geom`, some
+    /// cells more than once.
+    ///
+    /// A cell meets a polygon if its centre is inside, or if the boundary passes through it:
+    /// the first set comes from the scanline of [`Self::for_each_cell_in_polygon`], the
+    /// second from walking each segment through the cells it crosses. This costs about as
+    /// much as rasterising the polygon, where testing every cell of the bounding box against
+    /// the whole geometry was quadratic.
     pub fn for_each_cell_touching(&self, geom: &Geometry<f64>, mut f: impl FnMut(usize)) {
-        let Some(bbox) = geom.bounding_rect() else {
-            return;
-        };
-        let clamp_i = |v: f64| (v.floor().max(0.0) as usize).min(self.cnx - 1);
-        let clamp_j = |v: f64| (v.floor().max(0.0) as usize).min(self.cny - 1);
-        let i0 = clamp_i((bbox.min().x - self.origin.x) / self.cw);
-        let i1 = clamp_i((bbox.max().x - self.origin.x) / self.cw);
-        let j0 = clamp_j((bbox.min().y - self.origin.y) / self.ch);
-        let j1 = clamp_j((bbox.max().y - self.origin.y) / self.ch);
-        for j in j0..=j1 {
-            for i in i0..=i1 {
-                let min = Coord {
-                    x: self.origin.x + i as f64 * self.cw,
-                    y: self.origin.y + j as f64 * self.ch,
-                };
-                let cell = Rect::new(
-                    min,
-                    Coord {
-                        x: min.x + self.cw,
-                        y: min.y + self.ch,
-                    },
-                );
-                if cell.intersects(geom) {
-                    f(j * self.cnx + i);
-                }
+        self.touching(geom, &mut f);
+    }
+
+    fn touching(&self, geom: &Geometry<f64>, f: &mut dyn FnMut(usize)) {
+        let mut polygon = |p: &Polygon<f64>| {
+            self.for_each_cell_in_polygon(p, &mut *f);
+            for line in p.lines_iter() {
+                self.for_each_cell_on_segment(line.start, line.end, &mut *f);
             }
+        };
+        match geom {
+            Geometry::Polygon(p) => polygon(p),
+            Geometry::MultiPolygon(mp) => mp.iter().for_each(polygon),
+            Geometry::Rect(r) => polygon(&r.to_polygon()),
+            Geometry::Triangle(t) => polygon(&t.to_polygon()),
+            Geometry::GeometryCollection(gc) => gc.iter().for_each(|g| self.touching(g, f)),
+            Geometry::Point(p) => self.mark(self.cell_coords(p.0), f),
+            Geometry::MultiPoint(mp) => mp.iter().for_each(|p| self.mark(self.cell_coords(p.0), f)),
+            Geometry::Line(l) => self.for_each_cell_on_segment(l.start, l.end, f),
+            Geometry::LineString(ls) => ls
+                .lines()
+                .for_each(|l| self.for_each_cell_on_segment(l.start, l.end, f)),
+            Geometry::MultiLineString(mls) => mls
+                .iter()
+                .flat_map(LineString::lines)
+                .for_each(|l| self.for_each_cell_on_segment(l.start, l.end, f)),
+        }
+    }
+
+    /// Position in cell units: cell `(i, j)` spans `[i, i + 1] × [j, j + 1]`.
+    fn cell_coords(&self, c: Coord<f64>) -> (f64, f64) {
+        (
+            (c.x - self.origin.x) / self.cw,
+            (c.y - self.origin.y) / self.ch,
+        )
+    }
+
+    /// Calls `f` for the cell holding `(u, v)` (cell units), and for its neighbours when the
+    /// point lies on their shared side, since rectangles are closed.
+    fn mark(&self, (u, v): (f64, f64), f: &mut dyn FnMut(usize)) {
+        let range = |w: f64, n: usize| {
+            let hi = w.floor();
+            let lo = if w == hi { hi - 1.0 } else { hi };
+            (lo.max(0.0), hi.min(n as f64 - 1.0))
+        };
+        let ((i0, i1), (j0, j1)) = (range(u, self.cnx), range(v, self.cny));
+        // Also rejects NaN, for which every comparison is false.
+        if !(i0 <= i1 && j0 <= j1) {
+            return;
+        }
+        for j in j0 as usize..=j1 as usize {
+            for i in i0 as usize..=i1 as usize {
+                f(j * self.cnx + i);
+            }
+        }
+    }
+
+    /// Calls `f` for every cell the segment `a -> b` passes through, its ends included.
+    fn for_each_cell_on_segment(&self, a: Coord<f64>, b: Coord<f64>, f: &mut dyn FnMut(usize)) {
+        let (p, q) = (self.cell_coords(a), self.cell_coords(b));
+        let at = |t: f64| (p.0 + t * (q.0 - p.0), p.1 + t * (q.1 - p.1));
+        // Where the segment crosses a grid line; between two crossings it stays in one cell,
+        // the one holding the middle of that piece.
+        let mut ts = vec![0.0, 1.0];
+        for (s, e, n) in [(p.0, q.0, self.cnx), (p.1, q.1, self.cny)] {
+            if s == e || !s.is_finite() || !e.is_finite() {
+                continue;
+            }
+            let (lo, hi) = (s.min(e).ceil().max(0.0), s.max(e).floor().min(n as f64));
+            if lo <= hi {
+                ts.extend((lo as usize..=hi as usize).map(|k| (k as f64 - s) / (e - s)));
+            }
+        }
+        ts.sort_unstable_by(f64::total_cmp);
+        // The crossings themselves too: where the segment goes through a grid corner, it
+        // touches the two cells diagonal to its path.
+        for &t in &ts {
+            self.mark(at(t), f);
+        }
+        for w in ts.windows(2) {
+            self.mark(at(0.5 * (w[0] + w[1])), f);
         }
     }
 }
@@ -111,8 +173,81 @@ pub(crate) fn polygons(geom: &Geometry<f64>) -> Vec<&Polygon<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geo::Contains;
-    use geo_types::{polygon, Point};
+    use geo::{Contains, Intersects};
+    use geo_types::{polygon, Point, Rect};
+
+    /// Deterministic pseudo-random numbers in [0, 1) (64-bit LCG), to avoid a dependency.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    /// Star-shaped ring around `c`, so it never self-intersects: vertices at increasing
+    /// angles, radii between `r0` and `r1`.
+    fn star(rng: &mut Lcg, c: (f64, f64), r0: f64, r1: f64, n: usize) -> LineString<f64> {
+        let mut pts: Vec<Coord<f64>> = (0..n)
+            .map(|k| {
+                let a = std::f64::consts::TAU * (k as f64 + 0.8 * rng.next()) / n as f64;
+                let r = r0 + (r1 - r0) * rng.next();
+                Coord {
+                    x: c.0 + r * a.cos(),
+                    y: c.1 + r * a.sin(),
+                }
+            })
+            .collect();
+        pts.push(pts[0]);
+        LineString(pts)
+    }
+
+    #[test]
+    fn touching_cells_match_rectangle_intersection() {
+        let cells = Cells {
+            origin: Coord { x: -1.0, y: -2.0 },
+            cw: 0.7,
+            ch: 0.5,
+            cnx: 30,
+            cny: 40,
+        };
+        // The definition: every cell whose closed rectangle intersects the geometry.
+        let expected = |g: &Geometry<f64>| -> Vec<bool> {
+            (0..cells.len())
+                .map(|k| {
+                    let (i, j) = (k % cells.cnx, k / cells.cnx);
+                    let min = Coord {
+                        x: cells.origin.x + i as f64 * cells.cw,
+                        y: cells.origin.y + j as f64 * cells.ch,
+                    };
+                    let max = Coord {
+                        x: min.x + cells.cw,
+                        y: min.y + cells.ch,
+                    };
+                    Rect::new(min, max).intersects(g)
+                })
+                .collect()
+        };
+        // Polygons with a hole, and their outlines as lines, some reaching out of the grid.
+        let mut rng = Lcg(42);
+        let mut geoms = vec![Geometry::Point(Point::new(3.3, 4.1))];
+        for _ in 0..20 {
+            let c = (-1.0 + 21.0 * rng.next(), -2.0 + 20.0 * rng.next());
+            let outer = star(&mut rng, c, 2.0, 6.0, 12);
+            let hole = star(&mut rng, c, 0.3, 1.5, 7);
+            geoms.push(Geometry::Polygon(Polygon::new(outer.clone(), vec![hole])));
+            geoms.push(Geometry::LineString(outer));
+        }
+        for g in &geoms {
+            let mut got = vec![false; cells.len()];
+            cells.for_each_cell_touching(g, |k| got[k] = true);
+            assert_eq!(got, expected(g), "{g:?}");
+        }
+    }
 
     #[test]
     fn scanline_matches_point_in_polygon() {

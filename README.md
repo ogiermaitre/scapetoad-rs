@@ -85,6 +85,13 @@ Geometries are [`geo-types`](https://docs.rs/geo-types) (re-exported as
 Multi-layer sources take a layer name after `#`: `data.gpkg#roads`. Writing to an existing
 GeoPackage adds or replaces that layer.
 
+Every format keeps the features in their input order, which the report's feature indices
+rely on: FlatGeobuf is written without a spatial index, which would sort them.
+
+Shapefile text attributes are cut at 254 bytes, the most a dBase column holds. Features
+without geometry cannot be written to a shapefile (the other formats keep them; FlatGeobuf
+stores an empty geometry, read back as none).
+
 A TopoJSON file stores each border once, even when it is shared by two features or by two
 layers (a commune and its canton), so all its layers are written together. The command
 collects every output aimed at the same `.topojson` file and writes it at the end:
@@ -106,6 +113,10 @@ TopoJSON is often published as `.json`: a `.json` file is read as TopoJSON or Ge
 according to its content (written `.json` files are GeoJSON). TopoJSON has no standard way to
 state its coordinate system, so a file from elsewhere usually has none; published ones are
 mostly longitude/latitude, which the tool then warns about (see below).
+
+GeoJSON output carries the legacy `crs` member when the layer has an EPSG code. A GeoJSON file
+without it is taken as WGS 84 (RFC 7946) only if its coordinates fit longitude/latitude
+bounds; otherwise its CRS is unknown.
 
 The `gdal` feature needs GDAL and libclang at build time (`brew install gdal`; libclang
 comes with the Xcode command-line tools). Bindings are generated for the installed GDAL

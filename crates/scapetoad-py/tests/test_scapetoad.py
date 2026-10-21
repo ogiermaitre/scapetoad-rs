@@ -1,6 +1,7 @@
 """Tests of the Python bindings on ScapeToad's Swiss cantons sample."""
 
 import pickle
+import struct
 from pathlib import Path
 
 import pytest
@@ -169,13 +170,16 @@ def test_from_wkb_rejects_bad_input(cantons: st.Layer) -> None:
         st.Layer.from_wkb(wkb, {'a': [1, object()]})  # type: ignore[list-item]
 
 
-def test_write_and_read_back(carto: st.Cartogram, tmp_path: Path) -> None:
-    # GeoJSON keeps the feature order; FlatGeobuf sorts features for its spatial index.
-    out = tmp_path / 'cantons.geojson'
+@pytest.mark.parametrize('ext', ['geojson', 'fgb', 'shp'])
+def test_write_and_read_back(carto: st.Cartogram, tmp_path: Path, ext: str) -> None:
+    # Every format keeps the feature order, which size_errors and the report rely on.
+    out = tmp_path / f'cantons.{ext}'
     carto.master.write(out)
     back = st.read_layer(out)
     assert len(back) == len(carto.master)
     assert back.column('Pop2006') == carto.master.column('Pop2006')
+    # The sample has no .prj and LV03 coordinates: no format may make up a CRS.
+    assert back.crs is None
 
 
 def test_write_layers_topojson(carto: st.Cartogram, lakes: st.Layer, tmp_path: Path) -> None:
@@ -224,3 +228,30 @@ def test_transform_geodataframe_keeps_index(carto: st.Cartogram, lakes: st.Layer
     assert list(moved.index) == list(gdf.index)
     assert not moved.geometry.geom_equals(gdf.geometry).any()
     assert list(moved.geometry.to_wkb()) == carto.field.transform_layer(lakes).to_wkb()
+
+
+def test_corrupt_field_raises_scapetoad_error(carto: st.Cartogram) -> None:
+    data = carto.field.to_bytes()
+    # Grid size at bytes 12..20: a size that overflows must not panic (PanicException).
+    oversized = data[:12] + struct.pack('<II', 0xFFFFFFFF, 0xFFFFFFFF) + data[20:]
+    for bad in (data[:30], data[:-1], oversized):
+        with pytest.raises(st.ScapeToadError):
+            st.DeformationField.from_bytes(bad)
+
+
+@pytest.mark.parametrize(
+    'option', [{'margin': -0.6}, {'margin': float('nan')}, {'bias': 0.0}, {'tolerance': -1.0}]
+)
+def test_options_out_of_range_raise_value_error(cantons: st.Layer, option: dict[str, float]) -> None:
+    with pytest.raises(ValueError, match=next(iter(option))):
+        st.compute(cantons, 'Pop2006', quality=0, **option)  # type: ignore[arg-type]
+
+
+def test_features_without_a_number_are_reported(cantons: st.Layer) -> None:
+    pop: list[str | None] = [str(v) for v in cantons.column('Pop2006')]
+    pop[1:4] = ["1'234", '12,5', None]
+    layer = st.Layer.from_wkb(cantons.to_wkb(), {'pop': pop})
+    carto = st.compute(layer, 'pop', quality=0)
+    assert carto.report.no_value == [1, 2, 3]
+    assert carto.masses[1:4] == [0.0, 0.0, 0.0]
+    assert 'without a numeric value' in str(carto.report)
