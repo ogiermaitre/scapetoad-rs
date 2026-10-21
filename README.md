@@ -88,6 +88,10 @@ GeoPackage adds or replaces that layer.
 Every format keeps the features in their input order, which the report's feature indices
 rely on: FlatGeobuf is written without a spatial index, which would sort them.
 
+Shapefile text attributes are cut at 254 bytes, the most a dBase column holds. Features
+without geometry cannot be written to a shapefile (the other formats keep them; FlatGeobuf
+stores an empty geometry, read back as none).
+
 A TopoJSON file stores each border once, even when it is shared by two features or by two
 layers (a commune and its canton), so all its layers are written together. The command
 collects every output aimed at the same `.topojson` file and writes it at the end:

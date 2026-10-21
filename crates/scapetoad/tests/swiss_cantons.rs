@@ -116,6 +116,69 @@ fn formats_round_trip() {
     }
 }
 
+/// Unit squares in a row, one per value of a text attribute `name`.
+fn squares(geometries: &[bool], names: &[&str]) -> Layer {
+    use scapetoad::geo_types::polygon;
+    use scapetoad::{Feature, Field, FieldType, Value};
+    let mut layer = Layer::new("squares", vec![Field::new("name", FieldType::Text)]);
+    for (k, (&has_geometry, name)) in geometries.iter().zip(names).enumerate() {
+        let x = 2.0 * k as f64;
+        layer.features.push(Feature {
+            geometry: has_geometry.then(|| {
+                Geometry::Polygon(polygon![
+                    (x: x, y: 0.0), (x: x + 1.0, y: 0.0), (x: x + 1.0, y: 1.0), (x: x, y: 1.0)
+                ])
+            }),
+            values: vec![Value::Text(name.to_string())],
+        });
+    }
+    layer
+}
+
+#[test]
+fn shapefile_text_is_cut_at_254_bytes() {
+    use scapetoad::Value;
+    // 200 two-byte characters: the cut must fall between two of them.
+    let long = "é".repeat(200);
+    let layer = squares(&[true, true], &[&long, "short"]);
+    let path = tmp("long_text.shp");
+    io::write_layer(&layer, &path).unwrap();
+    let back = io::read_layer(&path).unwrap();
+    assert_eq!(
+        back.features[0].values[0],
+        Value::Text("é".repeat(127)),
+        "254 bytes"
+    );
+    assert_eq!(back.features[1].values[0], Value::Text("short".into()));
+}
+
+#[test]
+fn features_without_geometry() {
+    let layer = squares(&[true, false, true], &["a", "b", "c"]);
+    // FlatGeobuf keeps them, in place.
+    let path = tmp("null_geometry.fgb");
+    io::write_layer(&layer, &path).unwrap();
+    let back = io::read_layer(&path).unwrap();
+    assert_eq!(
+        back.features
+            .iter()
+            .map(|f| f.geometry.is_some())
+            .collect::<Vec<_>>(),
+        [true, false, true]
+    );
+    same_content(&layer, &back);
+    // The shapefile writer cannot store them: an error, and no partial file left behind.
+    let path = tmp("null_geometry.shp");
+    let err = io::write_layer(&layer, &path).unwrap_err();
+    assert!(
+        err.to_string().contains("feature 1 has no geometry"),
+        "{err}"
+    );
+    for ext in ["shp", "shx", "dbf"] {
+        assert!(!path.with_extension(ext).exists(), "{ext} left behind");
+    }
+}
+
 #[test]
 fn geojson_assumes_wgs84_only_for_lonlat_coordinates() {
     use scapetoad::geo_types::{polygon, Geometry};
