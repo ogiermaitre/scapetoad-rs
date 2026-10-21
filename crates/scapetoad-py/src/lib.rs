@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use pyo3::create_exception;
-use pyo3::exceptions::PyException;
+use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
 
 mod cartogram;
@@ -25,10 +25,12 @@ create_exception!(
 );
 
 /// Converts a library error: I/O errors become the matching `OSError` subclass
-/// (`FileNotFoundError`…), everything else a `ScapeToadError`.
+/// (`FileNotFoundError`…), an option out of range a `ValueError`, everything else a
+/// `ScapeToadError`.
 pub(crate) fn py_err(err: scapetoad::Error) -> PyErr {
     match err {
         scapetoad::Error::Io(e) => e.into(),
+        e @ scapetoad::Error::InvalidOption(_) => PyValueError::new_err(e.to_string()),
         other => ScapeToadError::new_err(other.to_string()),
     }
 }

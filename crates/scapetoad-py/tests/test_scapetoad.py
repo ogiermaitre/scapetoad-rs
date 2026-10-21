@@ -237,3 +237,11 @@ def test_corrupt_field_raises_scapetoad_error(carto: st.Cartogram) -> None:
     for bad in (data[:30], data[:-1], oversized):
         with pytest.raises(st.ScapeToadError):
             st.DeformationField.from_bytes(bad)
+
+
+@pytest.mark.parametrize(
+    'option', [{'margin': -0.6}, {'margin': float('nan')}, {'bias': 0.0}, {'tolerance': -1.0}]
+)
+def test_options_out_of_range_raise_value_error(cantons: st.Layer, option: dict[str, float]) -> None:
+    with pytest.raises(ValueError, match=next(iter(option))):
+        st.compute(cantons, 'Pop2006', quality=0, **option)  # type: ignore[arg-type]

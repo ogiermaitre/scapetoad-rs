@@ -4,7 +4,7 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use geo::Area;
+use geo::{Area, CoordsIter};
 use geo_types::{Coord, Geometry, LineString, Polygon, Rect};
 
 use crate::diffusion::{diffuse, DiffusionOptions, DiffusionStep, StopReason};
@@ -53,12 +53,13 @@ pub struct CartogramOptions {
     pub resolution: GridResolution,
     /// Value marking missing data; such features get the mean of the other values.
     pub missing_value: Option<f64>,
-    /// Margin added on each side of the layers' bounding box, as a fraction of its size.
-    /// The map can only deform inside this envelope.
+    /// Margin added on each side of the layers' bounding box, as a fraction of its size
+    /// (≥ 0). The map can only deform inside this envelope.
     pub margin: f64,
-    /// Densities are rescaled so the smallest non-zero cell is at least this value...
+    /// Densities are rescaled so the smallest non-zero cell is at least this value (≥ 0)...
     pub min_density: f64,
-    /// ...and this is added to every cell, so zero-valued regions shrink but never vanish.
+    /// ...and this is added to every cell (> 0), so zero-valued regions shrink but never
+    /// vanish; without it, the velocity `∇ρ / ρ` is undefined where the density is zero.
     pub bias: f64,
     pub diffusion: DiffusionOptions,
 }
@@ -75,6 +76,30 @@ impl CartogramOptions {
             bias: 1e-5,
             diffusion: DiffusionOptions::default(),
         }
+    }
+
+    /// Rejects values outside their range, which would otherwise give a meaningless map
+    /// reported as converged. Called before any computation.
+    fn validate(&self) -> Result<()> {
+        let at_least_zero = [
+            ("margin", self.margin),
+            ("min_density", self.min_density),
+            ("tolerance", self.diffusion.tolerance),
+        ];
+        for (name, v) in at_least_zero {
+            if !(v.is_finite() && v >= 0.0) {
+                return Err(Error::InvalidOption(format!(
+                    "{name} must be a finite number ≥ 0, got {v}"
+                )));
+            }
+        }
+        if !(self.bias.is_finite() && self.bias > 0.0) {
+            return Err(Error::InvalidOption(format!(
+                "bias must be a finite number > 0, got {}",
+                self.bias
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -416,6 +441,21 @@ fn compute(builder: CartogramBuilder<'_>, progress: &mut dyn FnMut(Progress)) ->
         constrained,
         included,
     } = builder;
+    options.validate()?;
+    let non_finite = |g: &Geometry<f64>| {
+        g.coords_iter()
+            .any(|c| !(c.x.is_finite() && c.y.is_finite()))
+    };
+    if let Some(feature) = master
+        .features
+        .iter()
+        .position(|f| f.geometry.as_ref().is_some_and(non_finite))
+    {
+        return Err(Error::NonFiniteCoordinate {
+            layer: master.name.clone(),
+            feature,
+        });
+    }
 
     // *** Values, areas and densities ***
     let values = clean_values(master, &options)?;
@@ -632,5 +672,43 @@ mod tests {
         options.missing_value = Some(-1.0);
         let vals = clean_values(&layer, &options).unwrap();
         assert_eq!(vals, vec![70.0, 30.0, 10.0, 10.0]);
+    }
+
+    #[test]
+    fn options_out_of_range_are_rejected() {
+        let layer = block();
+        let with = |set: fn(&mut CartogramOptions)| {
+            let mut options = CartogramOptions::new("pop");
+            set(&mut options);
+            options
+        };
+        let cases = [
+            ("margin", with(|o| o.margin = -0.6)),
+            ("margin", with(|o| o.margin = f64::NAN)),
+            ("min_density", with(|o| o.min_density = f64::INFINITY)),
+            ("bias", with(|o| o.bias = 0.0)),
+            ("bias", with(|o| o.bias = -1e-5)),
+            ("tolerance", with(|o| o.diffusion.tolerance = -1.0)),
+        ];
+        for (name, options) in cases {
+            match Cartogram::builder(&layer, options).run() {
+                Err(Error::InvalidOption(msg)) => assert!(msg.starts_with(name), "{msg}"),
+                other => panic!("{name}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn non_finite_coordinates_are_rejected() {
+        let mut layer = block();
+        layer.features[0].geometry = Some(Geometry::Polygon(
+            polygon![(x: 0.0, y: 0.0), (x: f64::NAN, y: 0.0), (x: 1.0, y: 1.0)],
+        ));
+        let res = Cartogram::builder(&layer, CartogramOptions::new("pop")).run();
+        assert!(
+            matches!(res, Err(Error::NonFiniteCoordinate { feature: 0, .. })),
+            "{:?}",
+            res.map(|c| c.report)
+        );
     }
 }

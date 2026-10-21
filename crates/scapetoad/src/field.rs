@@ -43,17 +43,22 @@ pub struct DeformationField {
 }
 
 impl DeformationField {
-    /// Undeformed field: every node at its original position.
+    /// Undeformed field: every node at its original position. The envelope must be finite,
+    /// with a positive width and height.
     pub fn identity(envelope: Rect<f64>, nx: usize, ny: usize) -> Result<Self> {
         if nx < 3 || ny < 3 {
             return Err(Error::GridTooSmall(nx, ny));
         }
+        check_envelope(&envelope)?;
+        let n = nx
+            .checked_mul(ny)
+            .ok_or_else(|| Error::InvalidField(format!("a {nx}x{ny} grid is too large")))?;
         let mut field = Self {
             envelope,
             nx,
             ny,
-            xs: vec![0.0; nx * ny],
-            ys: vec![0.0; nx * ny],
+            xs: vec![0.0; n],
+            ys: vec![0.0; n],
             crs: None,
         };
         let (cw, ch) = field.cell_size();
@@ -723,6 +728,14 @@ mod tests {
         h.extend(0i32.to_le_bytes());
         h.extend(wkt_len.to_le_bytes());
         h
+    }
+
+    #[test]
+    fn identity_needs_a_finite_envelope() {
+        for (x1, y1) in [(f64::INFINITY, 1.0), (f64::NAN, 1.0), (0.0, 1.0)] {
+            let res = DeformationField::identity(Rect::new((0.0, 0.0), (x1, y1)), 3, 3);
+            assert!(matches!(res, Err(Error::InvalidField(_))), "{x1} {y1}");
+        }
     }
 
     #[test]

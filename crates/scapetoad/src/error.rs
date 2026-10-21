@@ -16,8 +16,16 @@ pub enum Error {
     #[error("the master layer has no polygon with a positive area")]
     NoPolygonArea,
 
+    /// A NaN or infinite coordinate would turn every density, and so the whole field, to NaN.
+    #[error("feature {feature} of layer '{layer}' has a non-finite coordinate")]
+    NonFiniteCoordinate { layer: String, feature: usize },
+
     #[error("the cartogram grid must have at least 3x3 nodes, got {0}x{1}")]
     GridTooSmall(usize, usize),
+
+    /// A [`crate::CartogramOptions`] value outside its range.
+    #[error("invalid option: {0}")]
+    InvalidOption(String),
 
     #[error("invalid deformation field: {0}")]
     InvalidField(String),
