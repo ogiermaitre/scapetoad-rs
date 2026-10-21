@@ -72,10 +72,14 @@ pub(super) fn read(path: &Path) -> Result<Layer> {
                 .collect()
         })
         .unwrap_or_default();
-    let crs = header.crs().map(|c| Crs {
-        epsg: (c.code() != 0).then_some(c.code()),
-        wkt: c.wkt().map(str::to_string),
-    });
+    // Our writer, like others, stores an empty CRS table for a layer without CRS.
+    let crs = header
+        .crs()
+        .map(|c| Crs {
+            epsg: (c.code() != 0).then_some(c.code()),
+            wkt: c.wkt().map(str::to_string),
+        })
+        .filter(|c| c.epsg.is_some() || c.wkt.is_some());
     let name = header
         .name()
         .filter(|n| !n.is_empty())

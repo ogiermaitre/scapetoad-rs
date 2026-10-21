@@ -176,6 +176,8 @@ def test_write_and_read_back(carto: st.Cartogram, tmp_path: Path) -> None:
     back = st.read_layer(out)
     assert len(back) == len(carto.master)
     assert back.column('Pop2006') == carto.master.column('Pop2006')
+    # No `crs` member and LV03 coordinates: the CRS stays unknown rather than WGS 84.
+    assert back.crs is None
 
 
 def test_write_layers_topojson(carto: st.Cartogram, lakes: st.Layer, tmp_path: Path) -> None:

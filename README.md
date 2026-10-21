@@ -107,6 +107,10 @@ according to its content (written `.json` files are GeoJSON). TopoJSON has no st
 state its coordinate system, so a file from elsewhere usually has none; published ones are
 mostly longitude/latitude, which the tool then warns about (see below).
 
+GeoJSON output carries the legacy `crs` member when the layer has an EPSG code. A GeoJSON file
+without it is taken as WGS 84 (RFC 7946) only if its coordinates fit longitude/latitude
+bounds; otherwise its CRS is unknown.
+
 The `gdal` feature needs GDAL and libclang at build time (`brew install gdal`; libclang
 comes with the Xcode command-line tools). Bindings are generated for the installed GDAL
 version. Tested with GDAL 3.13. GDAL 3.13 support in the `gdal` crate is not released

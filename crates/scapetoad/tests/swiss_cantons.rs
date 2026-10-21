@@ -116,7 +116,42 @@ fn formats_round_trip() {
         io::write_layer(&cantons, &path).unwrap();
         let back = io::read_layer(&path).unwrap();
         same_content(&cantons, &back);
+        // The sample has no .prj: no format may invent a CRS for it.
+        assert_eq!(back.crs, None, "{ext}");
     }
+}
+
+#[test]
+fn geojson_assumes_wgs84_only_for_lonlat_coordinates() {
+    use scapetoad::geo_types::{polygon, Geometry};
+    use scapetoad::{Crs, Feature, Layer};
+    let epsg = |code| {
+        Some(Crs {
+            epsg: Some(code),
+            wkt: None,
+        })
+    };
+    let round_trip = |layer: &Layer, name: &str| {
+        let path = tmp(name);
+        io::write_layer(layer, &path).unwrap();
+        io::read_layer(&path).unwrap().crs
+    };
+
+    // Projected coordinates without a `crs` member: unknown, not WGS 84.
+    let mut cantons = io::read_layer(data("Cantons.shp")).unwrap();
+    assert_eq!(round_trip(&cantons, "lv03_no_crs.geojson"), None);
+    // A known EPSG code travels in the `crs` member.
+    cantons.crs = epsg(21781);
+    assert_eq!(round_trip(&cantons, "lv03.geojson"), epsg(21781));
+    // Longitude/latitude coordinates without a `crs` member: RFC 7946's WGS 84.
+    let mut lonlat = Layer::new("lonlat", Vec::new());
+    lonlat.features.push(Feature {
+        geometry: Some(Geometry::Polygon(polygon![
+            (x: 5.9, y: 45.8), (x: 10.5, y: 45.8), (x: 10.5, y: 47.8), (x: 5.9, y: 47.8)
+        ])),
+        values: Vec::new(),
+    });
+    assert_eq!(round_trip(&lonlat, "lonlat.geojson"), epsg(4326));
 }
 
 #[cfg(feature = "gdal")]

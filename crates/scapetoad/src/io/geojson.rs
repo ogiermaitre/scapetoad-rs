@@ -3,6 +3,8 @@
 //! RFC 7946 mandates WGS 84 coordinates, but projected GeoJSON is common in practice, and a
 //! cartogram is useless in lat/lon anyway. We write the coordinates we have, and add the
 //! legacy `crs` member when the layer has an EPSG code so tools like QGIS place it correctly.
+//! When reading a file without that member, WGS 84 is assumed only if the coordinates fit
+//! longitude/latitude bounds; otherwise the CRS stays unknown.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -48,7 +50,7 @@ pub(super) fn from_json(json: JsonValue, path: &Path) -> Result<Layer> {
         );
     }
     let (fields, values) = infer_schema(&rows);
-    Ok(Layer {
+    let mut layer = Layer {
         name: stem(path),
         fields,
         features: geoms
@@ -56,11 +58,17 @@ pub(super) fn from_json(json: JsonValue, path: &Path) -> Result<Layer> {
             .zip(values)
             .map(|(geometry, values)| Feature { geometry, values })
             .collect(),
-        crs: crs.or(Some(Crs {
+        crs,
+    };
+    // Projected GeoJSON without a `crs` member is common (we write it ourselves for layers
+    // without an EPSG code), so RFC 7946's WGS 84 is only assumed when the coordinates fit.
+    if layer.crs.is_none() && layer.looks_geographic() {
+        layer.crs = Some(Crs {
             epsg: Some(4326),
             wkt: None,
-        })),
-    })
+        });
+    }
+    Ok(layer)
 }
 
 pub(super) fn write(layer: &Layer, path: &Path) -> Result<()> {
