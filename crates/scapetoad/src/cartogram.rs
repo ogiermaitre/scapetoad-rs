@@ -17,6 +17,9 @@ use crate::stats::{size_errors, ErrorSummary};
 /// Name of the attribute added to the transformed master layer.
 pub const SIZE_ERROR_FIELD: &str = "SizeError";
 
+/// Default [`CartogramOptions::zero_density`].
+pub const ZERO_DENSITY: f64 = 0.1;
+
 /// How the cartogram attribute relates to the polygons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AttributeKind {
@@ -58,6 +61,11 @@ pub struct CartogramOptions {
     pub margin: f64,
     /// Densities are rescaled so the smallest non-zero cell is at least this value (≥ 0)...
     pub min_density: f64,
+    /// ...then cells at zero get this fraction of the smallest non-zero density (0 to 1).
+    /// With the bias alone, they sit about 10⁶ times below their neighbours: the velocity
+    /// `∇ρ / ρ` is huge at their edge and the adaptive step shrinks until the diffusion
+    /// stalls. 0 keeps ScapeToad's behaviour. Data without zeros is not affected.
+    pub zero_density: f64,
     /// ...and this is added to every cell (> 0), so zero-valued regions shrink but never
     /// vanish; without it, the velocity `∇ρ / ρ` is undefined where the density is zero.
     pub bias: f64,
@@ -73,6 +81,7 @@ impl CartogramOptions {
             missing_value: None,
             margin: 0.2,
             min_density: 10.0,
+            zero_density: ZERO_DENSITY,
             bias: 1e-5,
             diffusion: DiffusionOptions::default(),
         }
@@ -92,6 +101,12 @@ impl CartogramOptions {
                     "{name} must be a finite number ≥ 0, got {v}"
                 )));
             }
+        }
+        if !(0.0..=1.0).contains(&self.zero_density) {
+            return Err(Error::InvalidOption(format!(
+                "zero_density must be between 0 and 1, got {}",
+                self.zero_density
+            )));
         }
         if !(self.bias.is_finite() && self.bias > 0.0) {
             return Err(Error::InvalidOption(format!(
@@ -168,6 +183,7 @@ pub struct Cartogram {
     pub masses: Vec<f64>,
     /// Size error of each master feature, in percent (see [`crate::stats::size_errors`]).
     pub size_errors: Vec<f64>,
+    /// Statistics of `size_errors`, without the zero-valued features ([`Report::zero_value`]).
     pub errors: ErrorSummary,
     pub report: Report,
 }
@@ -251,6 +267,7 @@ pub struct Report {
     pub attribute: String,
     pub kind: AttributeKind,
     pub grid_size: (usize, usize),
+    pub zero_density: f64,
     pub bias: f64,
     pub feature_count: usize,
     /// Indices of the master features whose attribute holds no usable number (null, text
@@ -263,7 +280,14 @@ pub struct Report {
     pub included_layers: Vec<String>,
     pub iterations: usize,
     pub stop: StopReason,
+    /// Size error statistics, without the [`Report::zero_value`] features.
     pub errors: ErrorSummary,
+    /// Indices of the master features whose mass is 0 (a zero, negative or missing value).
+    /// Their size error is 0 whatever their area, so they are left out of `errors`…
+    pub zero_value: Vec<usize>,
+    /// …and their share of the master layer's area, in percent, before and after the
+    /// transformation shows how far they shrank instead.
+    pub zero_value_area: (f64, f64),
     /// Indices of the master features with an invalid geometry (OGC rules) before the
     /// transformation…
     pub invalid_input: Vec<usize>,
@@ -294,6 +318,11 @@ impl fmt::Display for Report {
             f,
             "Cartogram grid size: {} x {}",
             self.grid_size.0, self.grid_size.1
+        )?;
+        writeln!(
+            f,
+            "Zero-value density: {} of the smallest non-zero density",
+            self.zero_density
         )?;
         writeln!(f, "Bias value: {}\n", self.bias)?;
         writeln!(f, "CARTOGRAM LAYER & ATTRIBUTE STATISTICS:")?;
@@ -342,6 +371,19 @@ impl fmt::Display for Report {
             "Features with mean error +/- 1 standard deviation: {} of {} ({pct}%)\n",
             e.within_one_std_dev, e.count
         )?;
+        if !self.zero_value.is_empty() {
+            writeln!(
+                f,
+                "Features with a zero value, left out of the error statistics: {} (feature index from 0: {})",
+                self.zero_value.len(),
+                index_list(&self.zero_value)
+            )?;
+            writeln!(
+                f,
+                "Their share of the total area: {:.2}% before, {:.2}% after\n",
+                self.zero_value_area.0, self.zero_value_area.1
+            )?;
+        }
         writeln!(f, "GEOMETRY VALIDITY")?;
         writeln!(
             f,
@@ -544,6 +586,10 @@ fn compute(builder: CartogramBuilder<'_>, progress: &mut dyn FnMut(Progress)) ->
         if factor > 1.0 {
             rho.iter_mut().for_each(|v| *v *= factor);
         }
+        let floor = options.zero_density * min_positive * factor.max(1.0);
+        rho.iter_mut()
+            .filter(|v| **v == 0.0)
+            .for_each(|v| *v = floor);
     }
     rho.iter_mut().for_each(|v| *v += options.bias);
 
@@ -598,7 +644,21 @@ fn compute(builder: CartogramBuilder<'_>, progress: &mut dyn FnMut(Progress)) ->
     for (feat, &e) in projected.features.iter_mut().zip(&errors_per_feature) {
         feat.values[err_idx] = Value::Float(e);
     }
-    let errors = ErrorSummary::from_values(&errors_per_feature);
+    // A zero-valued feature's error is 0 whatever its area: counting it would pull the mean
+    // towards 100 when nothing moved, so these features are reported apart.
+    let zero_value: Vec<usize> = (0..masses.len()).filter(|&i| masses[i] == 0.0).collect();
+    let counted: Vec<f64> = errors_per_feature
+        .iter()
+        .zip(&masses)
+        .filter(|(_, &m)| m != 0.0)
+        .map(|(&e, _)| e)
+        .collect();
+    let errors = ErrorSummary::from_values(&counted);
+    let zero_share = |areas: &[f64]| {
+        let zero: f64 = zero_value.iter().map(|&i| areas[i]).sum();
+        100.0 * zero / areas.iter().sum::<f64>()
+    };
+    let zero_value_area = (zero_share(&areas), zero_share(&projected_areas));
 
     let value_mean = values.iter().sum::<f64>() / values.len().max(1) as f64;
     let report = Report {
@@ -606,6 +666,7 @@ fn compute(builder: CartogramBuilder<'_>, progress: &mut dyn FnMut(Progress)) ->
         attribute: options.attribute.clone(),
         kind: options.kind,
         grid_size: (nx, ny),
+        zero_density: options.zero_density,
         bias: options.bias,
         feature_count: master.features.len(),
         no_value,
@@ -617,6 +678,8 @@ fn compute(builder: CartogramBuilder<'_>, progress: &mut dyn FnMut(Progress)) ->
         iterations: result.iterations,
         stop: result.stop,
         errors,
+        zero_value,
+        zero_value_area,
         invalid_input: master.invalid_features(),
         invalid_output: projected.invalid_features(),
         duration: start.elapsed(),
@@ -671,6 +734,48 @@ mod tests {
         assert!(carto.errors.mean > 80.0 && carto.errors.mean < 120.0);
     }
 
+    /// Issue #10: with the bias alone, three zero-valued squares out of four stalled the
+    /// diffusion, and the size error summary still looked perfect.
+    #[test]
+    fn zero_values_shrink_quickly_and_stay_out_of_the_error_summary() {
+        let mut layer = block();
+        for feat in &mut layer.features[1..] {
+            feat.values[0] = Value::Int(0);
+        }
+        let mut options = CartogramOptions::new("pop");
+        options.resolution = GridResolution::Nodes(129);
+        let carto = Cartogram::builder(&layer, options).run().unwrap();
+        let r = &carto.report;
+        assert_eq!(r.stop, StopReason::Converged);
+        assert!(r.iterations < 100, "{} iterations", r.iterations);
+        assert!(r.invalid_output.is_empty());
+        assert_eq!(r.zero_value, vec![1, 2, 3]);
+        assert_eq!(r.errors.count, 1);
+        assert_eq!(r.errors.mean, carto.size_errors[0]);
+        let (before, after) = r.zero_value_area;
+        assert!((before - 75.0).abs() < 1e-9, "{before}");
+        assert!(after < 15.0, "{after}");
+        let text = r.to_string();
+        assert!(
+            text.contains("left out of the error statistics: 3 (feature index from 0: 1, 2, 3)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn zero_density_leaves_data_without_zeros_unchanged() {
+        let layer = block();
+        let run = |zero_density| {
+            let mut options = CartogramOptions::new("pop");
+            options.resolution = GridResolution::Nodes(65);
+            options.zero_density = zero_density;
+            Cartogram::builder(&layer, options).run().unwrap()
+        };
+        let (scapetoad, default) = (run(0.0), run(ZERO_DENSITY));
+        assert_eq!(scapetoad.master, default.master);
+        assert!(default.report.zero_value.is_empty());
+    }
+
     #[test]
     fn grid_is_proportional_to_envelope() {
         let env = Rect::new((0.0, 0.0), (200.0, 100.0));
@@ -697,7 +802,6 @@ mod tests {
             feat.values[0] = Value::Text(text.into());
         }
         layer.features[3].values[0] = Value::Null;
-        // A coarse grid: three empty squares out of four make a slow diffusion.
         let mut options = CartogramOptions::new("pop");
         options.resolution = GridResolution::Nodes(33);
         let carto = Cartogram::builder(&layer, options).run().unwrap();
@@ -724,6 +828,9 @@ mod tests {
             ("margin", with(|o| o.margin = -0.6)),
             ("margin", with(|o| o.margin = f64::NAN)),
             ("min_density", with(|o| o.min_density = f64::INFINITY)),
+            ("zero_density", with(|o| o.zero_density = -0.1)),
+            ("zero_density", with(|o| o.zero_density = 1.5)),
+            ("zero_density", with(|o| o.zero_density = f64::NAN)),
             ("bias", with(|o| o.bias = 0.0)),
             ("bias", with(|o| o.bias = -1e-5)),
             ("tolerance", with(|o| o.diffusion.tolerance = -1.0)),
