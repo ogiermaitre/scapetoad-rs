@@ -44,6 +44,7 @@ geometries before and after, by feature index). Main options:
 | `--nodes N` | explicit grid size |
 | `--constrain LAYER` | keep the shape of these features where the master layer doesn't cover them |
 | `--missing V` | value marking missing data, replaced by the mean |
+| `--zero-density F` | density of zero-valued features, as a fraction of the smallest non-zero density (default 0.1; 0 is ScapeToad's behaviour) |
 | `--layer IN[=OUT]` | transform a basemap too, and include it in the envelope |
 
 Layers given with `--layer` extend the envelope. A basemap applied later with `apply` should
@@ -133,7 +134,8 @@ does not reproject.
 ## Differences from ScapeToad
 
 The algorithm and its defaults are the same (envelope +20%, grid sizing, density rescaling
-and bias, Runge–Kutta diffusion, constrained deformation). These Java bugs are fixed:
+and bias, Runge–Kutta diffusion, constrained deformation), except for zero-valued features
+(see below). These Java bugs are fixed:
 
 - `CartogramGrid.projectPoint` scaled coordinates by `n / width` instead of `(n-1) / width`,
   so points took their deformation from up to one cell away, and extrapolated at the far edge.
@@ -147,6 +149,17 @@ and bias, Runge–Kutta diffusion, constrained deformation). These Java bugs are
 
 Other changes:
 
+- Cells of zero-valued features (a zero, negative or missing value) get 0.1 times the
+  smallest non-zero density (`zero_density`) before the bias is added. With the bias alone
+  (1e-5), they sat about 10⁶ times below their neighbours: the velocity `∇ρ / ρ` was huge at
+  their edge, the adaptive step shrank, and the diffusion took thousands of iterations or
+  made no visible progress. On the Swiss cantons with Grisons, Uri and Jura set to 0
+  (quality 20), it now takes 26 iterations instead of 3008, and those cantons keep 1.1% of
+  the area instead of 0.4%. Data without zero values gives the same result as before.
+  ScapeToad's unused `CartogramGastner` class capped the density contrast for the same
+  reason.
+- Zero-valued features are left out of the size error statistics, since their error is 0
+  whatever their area; the report lists them with their share of the area before and after.
 - Diffusion stops when no node moves more than `tolerance` (1e-7 cells) instead of exactly
   0, or as soon as the density spectrum shows that no node can move that far any more, with
   an iteration cap and a time limit (ScapeToad declared a 3-hour limit but never enforced

@@ -158,6 +158,7 @@ class Report:
     attribute: str
     kind: Literal['mass', 'density']
     grid_size: tuple[int, int]
+    zero_density: float
     bias: float
     feature_count: int
     no_value: list[int]
@@ -170,6 +171,11 @@ class Report:
     iterations: int
     stop: Literal['converged', 'max_iterations', 'timeout']
     errors: ErrorSummary
+    """Size error statistics, without the `zero_value` features."""
+    zero_value: list[int]
+    """Indices of the master features whose mass is 0; their size error is 0 whatever their area."""
+    zero_value_area: tuple[float, float]
+    """Their share of the total area in percent, before and after the transformation."""
     invalid_input: list[int]
     """Indices of the master features with an invalid geometry before the transformation."""
     invalid_output: list[int]
@@ -206,7 +212,8 @@ class Cartogram:
     def size_errors(self) -> list[float]:
         """Size error of each master feature: 100 × mass share / area share, 100 = exact."""
     @property
-    def errors(self) -> ErrorSummary: ...
+    def errors(self) -> ErrorSummary:
+        """Statistics of `size_errors`, without the zero-valued features (`report.zero_value`)."""
     @property
     def report(self) -> Report: ...
     def legend(self, values: Sequence[float] | None = None) -> Layer:
@@ -237,6 +244,7 @@ def compute(
     missing_value: float | None = None,
     margin: float | None = None,
     min_density: float | None = None,
+    zero_density: float | None = None,
     bias: float | None = None,
     tolerance: float | None = None,
     max_iterations: int | None = None,
@@ -254,6 +262,9 @@ def compute(
         missing_value: value marking missing data, replaced by the mean of the others.
         margin: envelope margin on each side, as a fraction of the extent (≥ 0, default 0.2).
         min_density: smallest non-zero cell density after rescaling (≥ 0, default 10).
+        zero_density: density of zero-valued features, as a fraction of the smallest non-zero
+            density (0–1, default 0.1). Higher converges faster but leaves them more area; 0 is
+            ScapeToad's behaviour, which can stall the diffusion.
         bias: added to every cell so zero regions shrink without vanishing (> 0, default 1e-5).
         tolerance: stop when no node moves more than this, in grid cells (≥ 0, default 1e-7).
         max_iterations: cap on integration steps (default 10 000).

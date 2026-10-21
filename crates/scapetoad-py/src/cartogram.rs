@@ -84,6 +84,11 @@ impl PyReport {
     }
 
     #[getter]
+    fn zero_density(&self) -> f64 {
+        self.inner.zero_density
+    }
+
+    #[getter]
     fn bias(&self) -> f64 {
         self.inner.bias
     }
@@ -140,9 +145,23 @@ impl PyReport {
         }
     }
 
+    /// Size error statistics, without the `zero_value` features.
     #[getter]
     fn errors(&self) -> PyErrorSummary {
         self.inner.errors.into()
+    }
+
+    /// Indices of the master features whose mass is 0 (a zero, negative or missing value);
+    /// their size error is 0 whatever their area, so `errors` leaves them out…
+    #[getter]
+    fn zero_value(&self) -> Vec<usize> {
+        self.inner.zero_value.clone()
+    }
+
+    /// …and their share of the total area in percent, before and after the transformation.
+    #[getter]
+    fn zero_value_area(&self) -> (f64, f64) {
+        self.inner.zero_value_area
     }
 
     /// Indices of the master features with an invalid geometry before the transformation…
@@ -339,6 +358,7 @@ impl PyCartogram {
     missing_value = None,
     margin = None,
     min_density = None,
+    zero_density = None,
     bias = None,
     tolerance = None,
     max_iterations = None,
@@ -358,6 +378,7 @@ pub fn compute(
     missing_value: Option<f64>,
     margin: Option<f64>,
     min_density: Option<f64>,
+    zero_density: Option<f64>,
     bias: Option<f64>,
     tolerance: Option<f64>,
     max_iterations: Option<usize>,
@@ -386,6 +407,7 @@ pub fn compute(
     options.missing_value = missing_value;
     options.margin = margin.unwrap_or(options.margin);
     options.min_density = min_density.unwrap_or(options.min_density);
+    options.zero_density = zero_density.unwrap_or(options.zero_density);
     options.bias = bias.unwrap_or(options.bias);
     let diffusion = &mut options.diffusion;
     diffusion.tolerance = tolerance.unwrap_or(diffusion.tolerance);

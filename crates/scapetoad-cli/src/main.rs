@@ -76,6 +76,10 @@ struct ComputeArgs {
     /// Envelope margin on each side, as a fraction of the layers' extent.
     #[arg(long, default_value_t = 0.2)]
     margin: f64,
+    /// Density of zero-valued features, as a fraction of the smallest non-zero density
+    /// (0-1). Higher converges faster but leaves them more area; 0 is ScapeToad's behaviour.
+    #[arg(long, default_value_t = scapetoad::ZERO_DENSITY)]
+    zero_density: f64,
     /// Stop the diffusion after this many seconds.
     #[arg(long, default_value_t = 3 * 3600)]
     max_time: u64,
@@ -414,6 +418,7 @@ fn compute(args: ComputeArgs, outputs: &mut Outputs) -> Result<()> {
     };
     options.missing_value = args.missing;
     options.margin = args.margin;
+    options.zero_density = args.zero_density;
     options.diffusion.max_duration = Some(Duration::from_secs(args.max_time));
     options.diffusion.tolerance = args.tolerance;
 

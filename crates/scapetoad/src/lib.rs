@@ -36,7 +36,7 @@ pub mod topology;
 
 pub use cartogram::{
     AttributeKind, Cartogram, CartogramBuilder, CartogramOptions, GridResolution, Progress, Report,
-    SIZE_ERROR_FIELD,
+    SIZE_ERROR_FIELD, ZERO_DENSITY,
 };
 pub use diffusion::{DiffusionOptions, DiffusionStep, StopReason};
 pub use error::{Error, Result};

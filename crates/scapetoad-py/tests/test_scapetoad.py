@@ -287,7 +287,14 @@ def test_corrupt_field_raises_scapetoad_error(carto: st.Cartogram) -> None:
 
 
 @pytest.mark.parametrize(
-    'option', [{'margin': -0.6}, {'margin': float('nan')}, {'bias': 0.0}, {'tolerance': -1.0}]
+    'option',
+    [
+        {'margin': -0.6},
+        {'margin': float('nan')},
+        {'zero_density': 1.5},
+        {'bias': 0.0},
+        {'tolerance': -1.0},
+    ],
 )
 def test_options_out_of_range_raise_value_error(cantons: st.Layer, option: dict[str, float]) -> None:
     with pytest.raises(ValueError, match=next(iter(option))):
@@ -302,3 +309,17 @@ def test_features_without_a_number_are_reported(cantons: st.Layer) -> None:
     assert carto.report.no_value == [1, 2, 3]
     assert carto.masses[1:4] == [0.0, 0.0, 0.0]
     assert 'without a numeric value' in str(carto.report)
+
+
+def test_zero_values_are_left_out_of_the_error_summary(cantons: st.Layer) -> None:
+    pop = cantons.column('Pop2006')
+    pop[5] = 0  # Grisons, the largest canton
+    layer = st.Layer.from_wkb(cantons.to_wkb(), {'pop': pop})
+    carto = st.compute(layer, 'pop', quality=0, zero_density=0.2)
+    report = carto.report
+    assert report.stop == 'converged'
+    assert report.zero_density == 0.2
+    assert report.zero_value == [5]
+    assert report.errors.count == len(pop) - 1
+    before, after = report.zero_value_area
+    assert after < before / 5
